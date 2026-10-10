@@ -155,7 +155,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <button class="navbtn" data-tab="logs"><span class="nd"></span>请求日志</button>
       <button class="navbtn" data-tab="help"><span class="nd"></span>使用说明</button>
     </nav>
-    <div class="side-foot">v1.1.0 · 数据存储于 R2<button class="ghost sm" id="btnLogout">退出登录</button></div>
+    <div class="side-foot">v1.1.0 · 数据存储于 R2<button class="ghost sm" id="btnLogout" data-act="logout">退出登录</button></div>
   </aside>
   <main>
     <div class="topbar">
@@ -249,10 +249,18 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <div id="toasts"></div>
 
 <script>
-var AK = localStorage.getItem('og_admin_key') || '';
+var AK = '';
 var S = { channels: [], keys: [], logs: [] };
 var editingCh = -1;
 var TITLES = { overview:'概览', channels:'渠道管理', keys:'密钥管理', logs:'请求日志', help:'使用说明' };
+
+/* 本地存储容错封装：某些 WebView/无痕模式下 localStorage 可能不可用 */
+var store = {
+  get: function(k){ try{ return window.localStorage.getItem(k); }catch(e){ return null; } },
+  set: function(k, v){ try{ window.localStorage.setItem(k, v); }catch(e){} },
+  del: function(k){ try{ window.localStorage.removeItem(k); }catch(e){} }
+};
+AK = store.get('og_admin_key') || '';
 
 function $(id){ return document.getElementById(id); }
 function esc(s){
@@ -281,6 +289,10 @@ function toast(msg, type){
   $('toasts').appendChild(el);
   setTimeout(function(){ el.classList.add('out'); setTimeout(function(){ el.remove(); }, 350); }, 3600);
 }
+/* 页面运行时错误直接弹提示，便于排查 */
+window.addEventListener('error', function(e){
+  try{ toast('页面错误：' + (e.message || '未知错误'), 'bad'); }catch(_){}
+});
 function api(path, method, body){
   var opt = { method: method || 'GET', headers: { 'X-Admin-Key': AK } };
   if(body !== undefined){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
@@ -307,7 +319,23 @@ function confirmDlg(title, text){
   });
 }
 
-/* ---------- 登录 ---------- */
+/* ---------- 登录 / 退出 ---------- */
+function doLogout(){
+  store.del('og_admin_key');
+  AK = ''; S = { channels: [], keys: [], logs: [] };
+  var akInput = $('ak');
+  if(akInput){ akInput.value = ''; }
+  setConn(false, '未连接');
+  var loginEl = $('login');
+  if(loginEl){
+    loginEl.style.display = 'flex';
+    loginEl.style.visibility = 'visible';
+    loginEl.style.opacity = '1';
+  }
+  renderAll();
+  if(akInput){ try{ akInput.focus(); }catch(e){} }
+  toast('已退出登录');
+}
 function setConn(ok, msg){
   var pill = $('connPill');
   pill.className = 'pill ' + (ok ? 'ok' : 'bad');
@@ -322,7 +350,7 @@ function connect(silent){
   setConn(true, '连接中…');
   Promise.all([api('/api/admin/channels'), api('/api/admin/keys')]).then(function(res){
     S.channels = res[0]; S.keys = res[1];
-    localStorage.setItem('og_admin_key', AK);
+    store.set('og_admin_key', AK);
     $('login').style.display = 'none';
     setConn(true, '已连接');
     renderAll();
@@ -404,7 +432,7 @@ function openChannelModal(i){
     '<label>优先级（越小越优先）<input id="m_prio" type="number" value="' + esc(c.priority == null ? 100 : c.priority) + '"></label>' +
     '<label class="check"><input id="m_enabled" type="checkbox"' + (c.enabled !== false ? ' checked' : '') + '> 启用该渠道</label>' +
     '</div>' +
-    '<label class="fld">模型映射（可选 JSON：网关模型名 → 渠道真实模型名）<textarea id="m_map" rows="2" placeholder=\'{"gpt-4o-mini": "gpt-4o-mini"}\'>' + esc(c.model_map && Object.keys(c.model_map).length ? JSON.stringify(c.model_map) : '') + '</textarea></label>' +
+    '<label class="fld">模型映射（可选 JSON：网关模型名 → 渠道真实模型名）<textarea id="m_map" rows="2" placeholder=\\\'{"gpt-4o-mini": "gpt-4o-mini-2024"}\\\'>' + esc(c.model_map && Object.keys(c.model_map).length ? JSON.stringify(c.model_map) : '') + '</textarea></label>' +
     '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-ch">保存</button></div>');
 }
 function saveChannel(){
@@ -540,7 +568,7 @@ function showCurl(i){
   var cmd = 'curl https://' + host + '/v1/chat/completions \\\n' +
     '  -H "Authorization: Bearer ' + k.key + '" \\\n' +
     '  -H "Content-Type: application/json" \\\n' +
-    '  -d \'{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}]}\'';
+    '  -d \\\'{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}]}\\\'';
   openModal('<h3>调用示例 · ' + esc(k.name) + '</h3><pre class="detail">' + esc(cmd) + '</pre>' +
     '<div class="row end"><button data-act="copy-text" data-t="' + esc(cmd) + '">复制</button><button class="ghost" data-act="close-modal">关闭</button></div>');
 }
@@ -594,6 +622,7 @@ document.addEventListener('click', function(e){
   var act = el.getAttribute('data-act');
   var i = parseInt(el.getAttribute('data-i'), 10);
   if(act === 'close-modal') closeModal();
+  else if(act === 'logout') doLogout();
   else if(act === 'toggle-ch' && !isNaN(i)){
     S.channels[i].enabled = el.checked;
     saveChannels().then(function(){ renderOverview(); }).catch(function(err){ toast(err.message, 'bad'); el.checked = !el.checked; });
@@ -641,12 +670,7 @@ document.addEventListener('click', function(e){
   $('logDate').value = new Date().toISOString().slice(0, 10);
   $('btnLogin').addEventListener('click', function(){ AK = $('ak').value.trim(); connect(false); });
   $('ak').addEventListener('keydown', function(e){ if(e.key === 'Enter') $('btnLogin').click(); });
-  $('btnLogout').addEventListener('click', function(){
-    localStorage.removeItem('og_admin_key');
-    AK = ''; S = { channels: [], keys: [], logs: [] };
-    setConn(false, '未连接');
-    $('login').style.display = 'flex';
-  });
+  $('btnLogout').addEventListener('click', function(){ doLogout(); });
   $('btnAddCh').addEventListener('click', function(){ openChannelModal(-1); });
   $('btnExport').addEventListener('click', exportConfig);
   $('btnImport').addEventListener('click', function(){ $('fileImport').click(); });
