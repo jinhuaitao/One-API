@@ -15,8 +15,7 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
 - 多渠道：按模型匹配渠道，按优先级排序，失败自动切换下一个渠道
 - 模型映射：网关侧模型名 → 渠道侧真实模型名（`model_map`）
 - 密钥管理：多 Key 发放、启用/禁用、Token 配额限制、用量自动累加
-- 中文管理控制台：`/admin` 侧边导航 + 概览仪表盘，可视化管理渠道、密钥、查看请求日志；
-  渠道支持一键连通性测试，密钥支持配额进度条与用量清零，配置支持导入/导出备份
+- 管理 API（需 `ADMIN_KEY`）：渠道、密钥的增删改查，渠道连通性测试，日志查询
 - 数据全在 R2：`data/channels.json`（渠道）、`data/keys.json`（密钥）、`logs/<日期>/`（请求日志）
 
 ## 自动创建 R2 的原理
@@ -72,17 +71,59 @@ git push -u origin main
 进入 **Settings → Bindings**，确认有一条 `R2` → `oneapi-gateway-data` 的绑定
 （来自 `wrangler.toml`，自动添加）。
 
-### 5. 打开管理后台
+### 5. 通过管理 API 配置渠道与密钥
 
-访问 `https://<你的worker>.workers.dev/admin`，输入 `ADMIN_KEY`：
+所有管理接口都需要在请求头携带 `X-Admin-Key: <ADMIN_KEY>`。
+以下 `HOST` 指 `https://<你的worker>.workers.dev`。
 
-1. **渠道管理** → 添加上游渠道（建议先用每行的「测试」按钮验证连通性，成功后再启用）：
-   - `OpenAI 兼容`：OpenAI / DeepSeek / Moonshot 等，填 `Base URL` + 渠道 `API Key`；
-   - `Anthropic 原生`：填 `https://api.anthropic.com` + `sk-ant-...` Key，
-     网关自动翻译格式，需填写「默认 max_tokens」（Anthropic 接口必填，未在请求中指定时使用）；
-   - **注意**：Base URL 末尾不要加 `/v1`，网关会自动拼接路径；
-2. **密钥管理** → 生成网关密钥，分发给调用方；
-3. 调用示例：
+**添加渠道**（先 `GET` 取出当前列表，改完再 `POST` 整体覆盖）：
+
+```bash
+# 查看渠道
+curl -H "X-Admin-Key: <ADMIN_KEY>" $HOST/api/admin/channels
+
+# 保存渠道（channels 为完整数组）
+curl -X POST -H "X-Admin-Key: <ADMIN_KEY>" -H "Content-Type: application/json" \
+  -d '{"channels":[{
+    "id":"ch_openai","name":"OpenAI 官方","type":"openai",
+    "base_url":"https://api.openai.com","api_key":"sk-...",
+    "models":["gpt-4o-mini"],"model_map":{},"priority":100,"enabled":true
+  }]}' $HOST/api/admin/channels
+
+# 测试渠道连通性
+curl -X POST -H "X-Admin-Key: <ADMIN_KEY>" -H "Content-Type: application/json" \
+  -d '{"id":"ch_openai"}' $HOST/api/admin/test-channel
+```
+
+渠道字段说明：
+- `type`：`openai`（OpenAI 兼容，直接透传）或 `anthropic`（Anthropic 原生，
+  填 `https://api.anthropic.com` + `sk-ant-...`，网关自动翻译格式）；
+- `api_key` / `api_keys`：单个 Key 用 `api_key`；**多个 Key**用 `api_keys` 数组
+  （或逗号分隔的字符串，如 `"sk-a,sk-b"`），网关每次请求随机选用一个做负载均衡，
+  遇到 401（Key 无效）/ 429（限流）自动换下一个 Key 重试，全部 Key 都不行才切换到下一个渠道；
+- **注意**：`base_url` 末尾不要加 `/v1`，网关会自动拼接路径；
+- `models`：支持的模型列表，`*` 表示全部；`model_map`：网关模型名 → 渠道真实模型名；
+- `default_max_tokens`：Anthropic 渠道必需（Anthropic 接口必填项）；
+- `priority`：数字越小越优先，失败自动切换下一个渠道。
+
+**添加密钥**：
+
+```bash
+# 查看密钥
+curl -H "X-Admin-Key: <ADMIN_KEY>" $HOST/api/admin/keys
+
+# 保存密钥（keys 为完整数组，quota_tokens 为 0 表示不限）
+curl -X POST -H "X-Admin-Key: <ADMIN_KEY>" -H "Content-Type: application/json" \
+  -d '{"keys":[{
+    "key":"sk-abc123","name":"前端应用","enabled":true,
+    "quota_tokens":0,"used_tokens":0,"requests":0
+  }]}' $HOST/api/admin/keys
+
+# 按天查询请求日志摘要
+curl -H "X-Admin-Key: <ADMIN_KEY>" "$HOST/api/admin/logs/summary?date=2026-10-11"
+```
+
+### 6. 调用网关
 
 ```bash
 curl https://<你的worker>.workers.dev/v1/chat/completions \
@@ -112,14 +153,15 @@ npm run deploy   # 先 ensure-r2 再 wrangler deploy
 | 接口 | 说明 |
 |---|---|
 | `GET /` | 网关状态 |
-| `GET /admin` | 中文管理后台（页面本身公开，数据接口需 `ADMIN_KEY`） |
 | `GET /v1/models` | 按已启用渠道聚合的模型列表（需网关密钥） |
 | `POST /v1/chat/completions` | 聊天补全，支持 `stream: true`（需网关密钥） |
 | `POST /v1/completions` | 补全（需网关密钥） |
 | `POST /v1/embeddings` | 向量（需网关密钥） |
 | `GET/POST /api/admin/channels` | 渠道增删改查（需 `X-Admin-Key`） |
 | `GET/POST /api/admin/keys` | 密钥增删改查（需 `X-Admin-Key`） |
-| `GET /api/admin/logs?date=YYYY-MM-DD` | 按天列出请求日志（需 `X-Admin-Key`） |
+| `POST /api/admin/test-channel` | 测试单个渠道连通性，body `{"id":"..."}`（需 `X-Admin-Key`） |
+| `GET /api/admin/logs/summary?date=YYYY-MM-DD` | 按天聚合请求日志摘要（需 `X-Admin-Key`） |
+| `GET /api/admin/log?key=...` | 查看单条日志详情（需 `X-Admin-Key`） |
 
 ## 常见问题
 
