@@ -130,7 +130,10 @@ npm run deploy   # 先 ensure-r2 再 wrangler deploy
 
 - **构建日志提示缺少 `CLOUDFLARE_ACCOUNT_ID`**：按上文第 2 步第 3 点补上构建环境变量后重新部署。
 - **想换 bucket 名字**：改 `wrangler.toml` 里的 `bucket_name` 即可，下次构建会自动创建新桶并绑定。
-- **流式请求的 token 用量**：SSE 透传时拿不到 `usage`，配额统计只对非流式请求精确；如需精确统计可关闭流式。
+- **流式请求的 token 用量**：网关会在转发流式请求时带上 `stream_options: {include_usage: true}`，
+  并解析上游在流末尾返回的 `usage`，因此流式请求也能精确统计（OpenAI 兼容渠道要求上游支持该参数，
+  不支持时网关会自动降级为普通流式，此时该次用量记为 0；Anthropic 渠道直接从原生事件中提取用量）。
+  日志中 `usage_missing: true` 表示该次流式请求未能拿到用量。
 - **Anthropic 渠道注意事项**：
   - 仅支持 `POST /v1/chat/completions`（`completions` / `embeddings` 不会路由到 Anthropic 渠道）；
   - `max_tokens` 必需：优先用请求中的 `max_tokens`，否则用渠道的「默认 max_tokens」（默认 4096）；
