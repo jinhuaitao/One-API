@@ -9,6 +9,7 @@
  *  - 渠道类型：openai（OpenAI 兼容接口）与 anthropic（Anthropic 原生 /v1/messages，
  *    网关自动做 OpenAI↔Anthropic 格式互转，调用方始终用 OpenAI 格式）
  *  - 多渠道 + 按模型路由 + 按优先级故障转移
+ *    （单个渠道的 API Key 支持逗号分隔多个，请求时随机轮询 + 失败自动切换下一个 Key）
  *  - 渠道配置 / API Key / 请求日志全部存放在 R2 中（data/*.json、logs/）
  *  - 自带中文管理后台：GET /admin（需 ADMIN_KEY）
  *
@@ -19,7 +20,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const LOG_PREFIX = 'logs/';
@@ -42,6 +43,20 @@ const json = (data, status = 200, extra = {}) =>
 
 const err = (message, status = 400, code = 'error') =>
   json({ error: { message, code } }, status);
+
+/* ---------------- 渠道 API Key（支持多 Key） ---------------- */
+
+/**
+ * 解析渠道的 API Key：支持用英文逗号分隔多个 Key。
+ * 例如："sk-a,sk-b,sk-c" 会被解析为 3 个 Key。
+ * 请求时会随机轮询起点，单个 Key 失败自动尝试下一个 Key。
+ */
+function channelKeys(channel) {
+  return String(channel.api_key || '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
 
 /* ---------------- R2 数据层 ---------------- */
 
@@ -165,7 +180,7 @@ function requireAdmin(env, request) {
 function pickChannels(channels, model, path) {
   return (channels || [])
     .filter((c) => {
-      if (!c.enabled || !c.api_key || !c.base_url) return false;
+      if (!c.enabled || channelKeys(c).length === 0 || !c.base_url) return false;
       const models = c.models || [];
       if (!models.includes('*') && !models.includes(model)) return false;
       if ((c.type || 'openai') === 'anthropic' && path !== '/v1/chat/completions')
@@ -456,7 +471,7 @@ function anthropicStreamToOpenAI(upstreamBody, model) {
   return transform.readable;
 }
 
-async function forwardOpenAI(channel, path, payload) {
+async function forwardOpenAI(channel, apiKey, path, payload) {
   const url = channel.base_url.replace(/\/+$/, '') + path;
   const body = { ...payload };
   // model_map：网关模型名 -> 渠道侧真实模型名
@@ -467,20 +482,20 @@ async function forwardOpenAI(channel, path, payload) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${channel.api_key}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   });
   return { res, translated: false };
 }
 
-async function forwardAnthropic(channel, payload) {
+async function forwardAnthropic(channel, apiKey, payload) {
   const url = channel.base_url.replace(/\/+$/, '') + '/v1/messages';
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': channel.api_key,
+      'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(openaiToAnthropic(payload, channel)),
@@ -489,11 +504,11 @@ async function forwardAnthropic(channel, payload) {
 }
 
 /** 按渠道类型分发：openai 走 OpenAI 兼容接口，anthropic 走原生 /v1/messages 并翻译格式 */
-async function forwardOnce(channel, path, payload) {
+async function forwardOnce(channel, apiKey, path, payload) {
   if ((channel.type || 'openai') === 'anthropic') {
-    return forwardAnthropic(channel, payload);
+    return forwardAnthropic(channel, apiKey, payload);
   }
-  return forwardOpenAI(channel, path, payload);
+  return forwardOpenAI(channel, apiKey, path, payload);
 }
 
 /** 记录请求日志到 R2（异步，不阻塞响应） */
@@ -552,58 +567,66 @@ async function handleProxy(env, ctx, request, path, auth) {
   const failures = [];
 
   for (const ch of candidates) {
-    try {
-      const { res: upstream, translated } = await forwardOnce(ch, path, body);
-      if (!upstream.ok) {
-        const text = await upstream.text().catch(() => '');
-        failures.push(`${ch.name}: HTTP ${upstream.status} ${text.slice(0, 200)}`);
-        continue;
-      }
-      // 流式请求：OpenAI 渠道直接透传 SSE，Anthropic 渠道翻译为 OpenAI 格式 SSE
-      if (body.stream) {
+    // 同一渠道可配多个 API Key（逗号分隔）：随机起点轮询，单个 Key 失败自动试下一个 Key
+    const keys = channelKeys(ch);
+    const start = Math.floor(Math.random() * keys.length);
+    for (let ki = 0; ki < keys.length; ki++) {
+      const keyIdx = (start + ki) % keys.length;
+      const apiKey = keys[keyIdx];
+      const tag = keys.length > 1 ? ` [Key${keyIdx + 1}/${keys.length}]` : '';
+      try {
+        const { res: upstream, translated } = await forwardOnce(ch, apiKey, path, body);
+        if (!upstream.ok) {
+          const text = await upstream.text().catch(() => '');
+          failures.push(`${ch.name}${tag}: HTTP ${upstream.status} ${text.slice(0, 200)}`);
+          continue;
+        }
+        // 流式请求：OpenAI 渠道直接透传 SSE，Anthropic 渠道翻译为 OpenAI 格式 SSE
+        if (body.stream) {
+          ctx.waitUntil(
+            logUsage(env, {
+              auth,
+              model: body.model,
+              channel: ch.name,
+              ok: true,
+              stream: true,
+              ms: Date.now() - started,
+            })
+          );
+          const streamBody = translated
+            ? anthropicStreamToOpenAI(upstream.body, body.model)
+            : upstream.body;
+          return new Response(streamBody, {
+            status: upstream.status,
+            headers: {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache',
+              ...CORS,
+            },
+          });
+        }
+        // 非流式：Anthropic 响应翻译为 OpenAI 格式（含 usage，可正常计费）
+        const data = translated
+          ? anthropicToOpenAI(await upstream.json(), body.model)
+          : await upstream.json();
+        const tokens = data?.usage?.total_tokens || 0;
         ctx.waitUntil(
-          logUsage(env, {
-            auth,
-            model: body.model,
-            channel: ch.name,
-            ok: true,
-            stream: true,
-            ms: Date.now() - started,
-          })
+          Promise.all([
+            logUsage(env, {
+              auth,
+              model: body.model,
+              channel: ch.name,
+              ok: true,
+              tokens,
+              ms: Date.now() - started,
+            }),
+            bumpKeyUsage(env, auth, tokens),
+          ])
         );
-        const streamBody = translated
-          ? anthropicStreamToOpenAI(upstream.body, body.model)
-          : upstream.body;
-        return new Response(streamBody, {
-          status: upstream.status,
-          headers: {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            ...CORS,
-          },
-        });
+        return json(data);
+      } catch (e) {
+        failures.push(`${ch.name}${tag}: ${e.message || e}`);
       }
-      // 非流式：Anthropic 响应翻译为 OpenAI 格式（含 usage，可正常计费）
-      const data = translated
-        ? anthropicToOpenAI(await upstream.json(), body.model)
-        : await upstream.json();
-      const tokens = data?.usage?.total_tokens || 0;
-      ctx.waitUntil(
-        Promise.all([
-          logUsage(env, {
-            auth,
-            model: body.model,
-            channel: ch.name,
-            ok: true,
-            tokens,
-            ms: Date.now() - started,
-          }),
-          bumpKeyUsage(env, auth, tokens),
-        ])
-      );
-      return json(data);
-    } catch (e) {
-      failures.push(`${ch.name}: ${e.message || e}`);
     }
   }
 
@@ -712,53 +735,69 @@ async function handleAdmin(env, request) {
     }
     return json({ date, truncated: listed.truncated, logs });
   }
-  // 测试单个渠道：发一条最小请求，返回延迟与结果摘要
+  // 测试单个渠道：对该渠道的每个 API Key 各发一条最小请求，返回逐 Key 结果
   if (path === '/api/admin/test-channel' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     const channels = await r2GetJson(env, CHANNELS_KEY, []);
     const ch = channels.find((c) => c.id === (body && body.id));
     if (!ch) return err('渠道不存在', 404, 'not_found');
+    const keys = channelKeys(ch);
+    if (!keys.length) return err('该渠道未配置 API Key', 400, 'no_api_key');
     const model = (ch.models || []).find((m) => m !== '*') || 'test';
-    const started = Date.now();
-    try {
-      const { res: upstream, translated } = await forwardOnce(
-        ch,
-        '/v1/chat/completions',
-        {
-          model,
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 16,
+    const results = [];
+    for (let i = 0; i < keys.length; i++) {
+      const started = Date.now();
+      try {
+        const { res: upstream, translated } = await forwardOnce(
+          ch,
+          keys[i],
+          '/v1/chat/completions',
+          {
+            model,
+            messages: [{ role: 'user', content: 'ping' }],
+            max_tokens: 16,
+          }
+        );
+        const ms = Date.now() - started;
+        if (!upstream.ok) {
+          const text = await upstream.text().catch(() => '');
+          results.push({
+            index: i + 1,
+            ok: false,
+            ms,
+            http_status: upstream.status,
+            error: text.slice(0, 300) || `HTTP ${upstream.status}`,
+          });
+          continue;
         }
-      );
-      const ms = Date.now() - started;
-      if (!upstream.ok) {
-        const text = await upstream.text().catch(() => '');
-        return json({
-          ok: false,
+        const data = await upstream.json().catch(() => null);
+        let snippet = '';
+        if (translated && data) {
+          snippet = (data.content || [])
+            .filter((b) => b.type === 'text')
+            .map((b) => b.text)
+            .join('')
+            .slice(0, 200);
+        } else if (data && data.choices && data.choices[0]) {
+          snippet = String(data.choices[0].message?.content || '').slice(0, 200);
+        }
+        results.push({
+          index: i + 1,
+          ok: true,
           ms,
           http_status: upstream.status,
-          error: text.slice(0, 300) || `HTTP ${upstream.status}`,
+          snippet,
+        });
+      } catch (e) {
+        results.push({
+          index: i + 1,
+          ok: false,
+          ms: Date.now() - started,
+          error: String(e.message || e).slice(0, 300),
         });
       }
-      const data = await upstream.json().catch(() => null);
-      let snippet = '';
-      if (translated && data) {
-        snippet = (data.content || [])
-          .filter((b) => b.type === 'text')
-          .map((b) => b.text)
-          .join('')
-          .slice(0, 200);
-      } else if (data && data.choices && data.choices[0]) {
-        snippet = String(data.choices[0].message?.content || '').slice(0, 200);
-      }
-      return json({ ok: true, ms, http_status: upstream.status, snippet });
-    } catch (e) {
-      return json({
-        ok: false,
-        ms: Date.now() - started,
-        error: String(e.message || e).slice(0, 300),
-      });
     }
+    return json({ ok: results.some((r) => r.ok), keys: results });
   }
   return err('未知管理接口', 404, 'not_found');
 }

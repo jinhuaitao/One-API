@@ -407,7 +407,7 @@ function renderChannels(){
     var models = (c.models || []).map(function(m){ return '<span class="chip">' + esc(m) + '</span>'; }).join('');
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-ch" data-i="' + i + '"' + (c.enabled ? ' checked' : '') + '><span></span></label></td>' +
-      '<td><b>' + esc(c.name) + '</b></td>' +
+      '<td><b>' + esc(c.name) + '</b><div class="muted">API Key × ' + String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length + '</div></td>' +
       '<td>' + typeBadge(c) + '</td>' +
       '<td class="mono">' + esc(c.base_url) + '</td>' +
       '<td>' + models + '</td>' +
@@ -426,7 +426,7 @@ function openChannelModal(i){
     '<label>名称<input id="m_name" type="text" value="' + esc(c.name || '') + '" placeholder="如：OpenAI 官方"></label>' +
     '<label>渠道类型<select id="m_type"><option value="openai"' + ((c.type || 'openai') === 'openai' ? ' selected' : '') + '>OpenAI 兼容</option><option value="anthropic"' + (c.type === 'anthropic' ? ' selected' : '') + '>Anthropic 原生</option></select></label>' +
     '<label>Base URL（末尾不要加 /v1）<input id="m_base" type="text" value="' + esc(c.base_url || '') + '" placeholder="https://api.openai.com"></label>' +
-    '<label>渠道 API Key<input id="m_key" type="password" value="' + esc(c.api_key || '') + '" placeholder="sk-..."></label>' +
+    '<label>渠道 API Key（多个 Key 用英文逗号 , 分隔）<input id="m_key" type="password" value="' + esc(c.api_key || '') + '" placeholder="sk-...,sk-..."></label>' +
     '<label>支持的模型（逗号分隔，* 表全部）<input id="m_models" type="text" value="' + esc((c.models || []).join(',')) + '"></label>' +
     '<label>默认 max_tokens（Anthropic 必需）<input id="m_maxt" type="number" value="' + esc(c.default_max_tokens || 4096) + '"></label>' +
     '<label>优先级（越小越优先）<input id="m_prio" type="number" value="' + esc(c.priority == null ? 100 : c.priority) + '"></label>' +
@@ -444,7 +444,7 @@ function saveChannel(){
     name: $('m_name').value.trim() || '未命名渠道',
     type: $('m_type').value || 'openai',
     base_url: $('m_base').value.trim().replace(/\\/+$/, ''),
-    api_key: $('m_key').value.trim(),
+    api_key: $('m_key').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean).join(','),
     models: $('m_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
     model_map: map,
     default_max_tokens: parseInt($('m_maxt').value, 10) || 4096,
@@ -470,21 +470,17 @@ function testChannel(i, btn){
   var old = btn.textContent;
   btn.textContent = '测试中…';
   api('/api/admin/test-channel', 'POST', { id: c.id }).then(function(r){
-    if(r.ok){
-      openModal('<h3>渠道测试 · ' + esc(c.name) + '</h3>' +
-        '<div class="kv"><span>结果</span><b class="good">成功</b></div>' +
-        '<div class="kv"><span>延迟</span><b>' + esc(fmtMs(r.ms)) + '</b></div>' +
-        '<div class="kv"><span>状态码</span><b>' + esc(r.http_status) + '</b></div>' +
-        (r.snippet ? '<p class="muted">返回片段</p><pre class="detail">' + esc(r.snippet) + '</pre>' : '') +
-        '<div class="row end"><button class="ghost" data-act="close-modal">关闭</button></div>');
-    }else{
-      openModal('<h3>渠道测试 · ' + esc(c.name) + '</h3>' +
-        '<div class="kv"><span>结果</span><b class="bad">失败</b></div>' +
-        '<div class="kv"><span>延迟</span><b>' + esc(fmtMs(r.ms)) + '</b></div>' +
-        (r.http_status ? '<div class="kv"><span>状态码</span><b>' + esc(r.http_status) + '</b></div>' : '') +
-        '<p class="muted">错误信息</p><pre class="detail">' + esc(r.error || '未知错误') + '</pre>' +
-        '<div class="row end"><button class="ghost" data-act="close-modal">关闭</button></div>');
-    }
+    var rows = (r.keys || []).map(function(k){
+      return '<tr><td>Key ' + k.index + '</td>' +
+        '<td>' + (k.ok ? '<b class="good">成功</b>' : '<b class="bad">失败</b>') + '</td>' +
+        '<td>' + esc(fmtMs(k.ms)) + '</td>' +
+        '<td>' + esc(k.http_status || '-') + '</td>' +
+        '<td class="mono">' + esc(k.ok ? (k.snippet || '') : (k.error || '未知错误')) + '</td></tr>';
+    }).join('');
+    openModal('<h3>渠道测试 · ' + esc(c.name) + '</h3>' +
+      '<div class="kv"><span>总体</span>' + (r.ok ? '<b class="good">至少一个 Key 可用</b>' : '<b class="bad">全部 Key 失败</b>') + '</div>' +
+      '<table><thead><tr><th>Key</th><th>结果</th><th>延迟</th><th>状态码</th><th>详情</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<div class="row end"><button class="ghost" data-act="close-modal">关闭</button></div>');
   }).catch(function(e){ toast(e.message, 'bad'); })
     .then(function(){ btn.disabled = false; btn.textContent = old; });
 }
