@@ -15,7 +15,8 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
 - 多渠道：按模型匹配渠道，按优先级排序，失败自动切换下一个渠道
 - 模型映射：网关侧模型名 → 渠道侧真实模型名（`model_map`）
 - 密钥管理：多 Key 发放、启用/禁用、Token 配额限制、用量自动累加
-- 中文管理后台：`/admin` 可视化管理渠道、密钥、查看请求日志
+- 中文管理控制台：`/admin` 侧边导航 + 概览仪表盘，可视化管理渠道、密钥、查看请求日志；
+  渠道支持一键连通性测试，密钥支持配额进度条与用量清零，配置支持导入/导出备份
 - 数据全在 R2：`data/channels.json`（渠道）、`data/keys.json`（密钥）、`logs/<日期>/`（请求日志）
 
 ## 自动创建 R2 的原理
@@ -75,10 +76,11 @@ git push -u origin main
 
 访问 `https://<你的worker>.workers.dev/admin`，输入 `ADMIN_KEY`：
 
-1. **渠道管理** → 添加上游渠道：
+1. **渠道管理** → 添加上游渠道（建议先用每行的「测试」按钮验证连通性，成功后再启用）：
    - `OpenAI 兼容`：OpenAI / DeepSeek / Moonshot 等，填 `Base URL` + 渠道 `API Key`；
    - `Anthropic 原生`：填 `https://api.anthropic.com` + `sk-ant-...` Key，
      网关自动翻译格式，需填写「默认 max_tokens」（Anthropic 接口必填，未在请求中指定时使用）；
+   - **注意**：Base URL 末尾不要加 `/v1`，网关会自动拼接路径；
 2. **密钥管理** → 生成网关密钥，分发给调用方；
 3. 调用示例：
 
