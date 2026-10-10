@@ -20,7 +20,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const LOG_PREFIX = 'logs/';
@@ -374,16 +374,31 @@ function anthropicToOpenAI(data, model) {
   };
 }
 
-/** Anthropic SSE → OpenAI SSE（流式翻译） */
-function anthropicStreamToOpenAI(upstreamBody, model) {
+/** Anthropic SSE → OpenAI SSE（流式翻译）
+ *  onUsage 可选回调：流结束时返回 {prompt_tokens, completion_tokens, total_tokens}，
+ *  从 message_start / message_delta 事件中提取；拿不到则为 null */
+function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const created = Math.floor(Date.now() / 1000);
   let msgId = 'chatcmpl-' + Math.random().toString(36).slice(2);
   let buffer = '';
   let stopReason = null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let usageSettled = false;
   const toolIndexByBlock = {};
   let toolCounter = 0;
+
+  const settleUsage = (u) => {
+    if (usageSettled) return;
+    usageSettled = true;
+    try {
+      onUsage(u);
+    } catch {
+      // 忽略
+    }
+  };
 
   const sse = (controller, obj) =>
     controller.enqueue(encoder.encode('data: ' + JSON.stringify(obj) + '\n\n'));
@@ -399,6 +414,11 @@ function anthropicStreamToOpenAI(upstreamBody, model) {
     if (event === 'message_start') {
       if (p.message && p.message.id)
         msgId = 'chatcmpl-' + String(p.message.id).replace(/^msg_/, '');
+      const u = p.message && p.message.usage;
+      if (u) {
+        inputTokens = u.input_tokens || 0;
+        outputTokens = u.output_tokens || 0;
+      }
       sse(controller, chunk({ role: 'assistant' }));
     } else if (event === 'content_block_start') {
       const b = p.content_block || {};
@@ -435,6 +455,8 @@ function anthropicStreamToOpenAI(upstreamBody, model) {
     } else if (event === 'message_delta') {
       if (p.delta && p.delta.stop_reason)
         stopReason = mapAnthropicStopReason(p.delta.stop_reason);
+      if (p.usage && typeof p.usage.output_tokens === 'number')
+        outputTokens = p.usage.output_tokens;
     } else if (event === 'message_stop') {
       sse(controller, chunk({}, stopReason || 'stop'));
     }
@@ -464,10 +486,80 @@ function anthropicStreamToOpenAI(upstreamBody, model) {
     },
     flush(controller) {
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      const total = inputTokens + outputTokens;
+      settleUsage(
+        total > 0
+          ? {
+              prompt_tokens: inputTokens,
+              completion_tokens: outputTokens,
+              total_tokens: total,
+            }
+          : null
+      );
     },
   });
 
-  upstreamBody.pipeTo(transform.writable).catch(() => {});
+  upstreamBody.pipeTo(transform.writable).then(
+    () => {},
+    () => settleUsage(null)
+  );
+  return transform.readable;
+}
+
+/**
+ * 监听 OpenAI SSE 流并提取最后的 usage 数据（需上游支持 stream_options.include_usage，
+ * 上游会在 [DONE] 前发送一个只带 usage 的 chunk）。
+ * 数据原样透传给客户端，不影响流式体验；流结束（或中断）时通过 onUsage 回调返回
+ * {prompt_tokens, completion_tokens, total_tokens}，拿不到则为 null。
+ */
+function tapOpenAISSEUsage(upstreamBody, onUsage) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let usage = null;
+  let settled = false;
+  const done = (u) => {
+    if (settled) return;
+    settled = true;
+    try {
+      onUsage(u);
+    } catch {
+      // 忽略
+    }
+  };
+
+  const transform = new TransformStream({
+    transform(bytes, controller) {
+      controller.enqueue(bytes);
+      buffer += decoder.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n');
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        let data = '';
+        for (const line of raw.split('\n')) {
+          const t = line.trim();
+          if (t.startsWith('data:')) data += t.slice(5).trim();
+        }
+        if (!data || data === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(data);
+          if (obj && obj.usage && typeof obj.usage.total_tokens === 'number') {
+            usage = obj.usage;
+          }
+        } catch {
+          // 忽略无法解析的事件
+        }
+      }
+    },
+    flush() {
+      done(usage);
+    },
+  });
+
+  upstreamBody.pipeTo(transform.writable).then(
+    () => {},
+    () => done(usage)
+  );
   return transform.readable;
 }
 
@@ -478,14 +570,35 @@ async function forwardOpenAI(channel, apiKey, path, payload) {
   if (body.model && channel.model_map && channel.model_map[body.model]) {
     body.model = channel.model_map[body.model];
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // 流式请求尝试索取 usage（用于精确统计 token）；上游不支持该参数时自动降级重试
+  const wantUsage = body.stream && path === '/v1/chat/completions';
+  if (wantUsage) {
+    body.stream_options = { ...(body.stream_options || {}), include_usage: true };
+  }
+  const doFetch = (b) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(b),
+    });
+  let res = await doFetch(body);
+  if (wantUsage && res.status === 400) {
+    const fallback = { ...body };
+    delete fallback.stream_options;
+    const retry = await doFetch(fallback);
+    if (retry.ok) {
+      res = retry;
+    } else {
+      try {
+        await retry.body.cancel();
+      } catch {
+        // 忽略
+      }
+    }
+  }
   return { res, translated: false };
 }
 
@@ -581,21 +694,36 @@ async function handleProxy(env, ctx, request, path, auth) {
           failures.push(`${ch.name}${tag}: HTTP ${upstream.status} ${text.slice(0, 200)}`);
           continue;
         }
-        // 流式请求：OpenAI 渠道直接透传 SSE，Anthropic 渠道翻译为 OpenAI 格式 SSE
+        // 流式请求：OpenAI 渠道透传 SSE 并解析 usage，Anthropic 渠道翻译为 OpenAI 格式 SSE 并提取 usage；
+        // 流结束后记录 token 用量与请求次数（拿不到 usage 时记为 0）
         if (body.stream) {
-          ctx.waitUntil(
-            logUsage(env, {
-              auth,
-              model: body.model,
-              channel: ch.name,
-              ok: true,
-              stream: true,
-              ms: Date.now() - started,
-            })
-          );
+          let resolveUsage;
+          const usagePromise = new Promise((r) => {
+            resolveUsage = r;
+          });
           const streamBody = translated
-            ? anthropicStreamToOpenAI(upstream.body, body.model)
-            : upstream.body;
+            ? anthropicStreamToOpenAI(upstream.body, body.model, (u) => resolveUsage(u))
+            : tapOpenAISSEUsage(upstream.body, (u) => resolveUsage(u));
+          ctx.waitUntil(
+            usagePromise
+              .then((usage) => {
+                const tokens = (usage && usage.total_tokens) || 0;
+                return Promise.all([
+                  logUsage(env, {
+                    auth,
+                    model: body.model,
+                    channel: ch.name,
+                    ok: true,
+                    stream: true,
+                    tokens,
+                    usage_missing: !usage,
+                    ms: Date.now() - started,
+                  }),
+                  bumpKeyUsage(env, auth, tokens),
+                ]);
+              })
+              .catch(() => {})
+          );
           return new Response(streamBody, {
             status: upstream.status,
             headers: {
