@@ -674,6 +674,92 @@ async function handleAdmin(env, request) {
     if (!obj) return err('日志不存在', 404, 'not_found');
     return json(await obj.json());
   }
+  // 按天聚合日志摘要（后台「请求日志」页用，避免前端逐条拉取）
+  if (path === '/api/admin/logs/summary' && request.method === 'GET') {
+    const date =
+      url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
+    const listed = await env.R2.list({
+      prefix: `${LOG_PREFIX}${date}/`,
+      limit: 100,
+    });
+    const keys = listed.objects.map((o) => o.key).reverse();
+    const logs = [];
+    for (let i = 0; i < keys.length; i += 20) {
+      const results = await Promise.all(
+        keys.slice(i, i + 20).map(async (k) => {
+          try {
+            const o = await env.R2.get(k);
+            if (!o) return null;
+            const d = await o.json();
+            return {
+              key: k,
+              ts: d.ts,
+              key_name: d.key_name,
+              model: d.model,
+              channel: d.channel,
+              ok: d.ok,
+              tokens: d.tokens || 0,
+              ms: d.ms || 0,
+              stream: !!d.stream,
+              error: d.error ? String(d.error).slice(0, 120) : '',
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const r of results) if (r) logs.push(r);
+    }
+    return json({ date, truncated: listed.truncated, logs });
+  }
+  // 测试单个渠道：发一条最小请求，返回延迟与结果摘要
+  if (path === '/api/admin/test-channel' && request.method === 'POST') {
+    const body = await request.json().catch(() => null);
+    const channels = await r2GetJson(env, CHANNELS_KEY, []);
+    const ch = channels.find((c) => c.id === (body && body.id));
+    if (!ch) return err('渠道不存在', 404, 'not_found');
+    const model = (ch.models || []).find((m) => m !== '*') || 'test';
+    const started = Date.now();
+    try {
+      const { res: upstream, translated } = await forwardOnce(
+        ch,
+        '/v1/chat/completions',
+        {
+          model,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 16,
+        }
+      );
+      const ms = Date.now() - started;
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => '');
+        return json({
+          ok: false,
+          ms,
+          http_status: upstream.status,
+          error: text.slice(0, 300) || `HTTP ${upstream.status}`,
+        });
+      }
+      const data = await upstream.json().catch(() => null);
+      let snippet = '';
+      if (translated && data) {
+        snippet = (data.content || [])
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text)
+          .join('')
+          .slice(0, 200);
+      } else if (data && data.choices && data.choices[0]) {
+        snippet = String(data.choices[0].message?.content || '').slice(0, 200);
+      }
+      return json({ ok: true, ms, http_status: upstream.status, snippet });
+    } catch (e) {
+      return json({
+        ok: false,
+        ms: Date.now() - started,
+        error: String(e.message || e).slice(0, 300),
+      });
+    }
+  }
   return err('未知管理接口', 404, 'not_found');
 }
 
