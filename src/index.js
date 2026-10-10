@@ -10,14 +10,12 @@
  *    网关自动做 OpenAI↔Anthropic 格式互转，调用方始终用 OpenAI 格式）
  *  - 多渠道 + 按模型路由 + 按优先级故障转移
  *  - 渠道配置 / API Key / 请求日志全部存放在 R2 中（data/*.json、logs/）
- *  - 自带中文管理后台：GET /admin（需 ADMIN_KEY）
+ *  - 管理 API（需 ADMIN_KEY）：渠道、密钥的增删改查，渠道连通性测试，日志查询
  *
  * 环境变量 / 绑定：
  *  - R2        : r2_buckets 绑定（wrangler.toml），bucket 由构建脚本自动创建
- *  - ADMIN_KEY : 管理员密钥，请设为 Secret（管理后台 + 管理 API 鉴权）
+ *  - ADMIN_KEY : 管理员密钥，请设为 Secret（管理 API 鉴权：/api/admin/*）
  */
-
-import { ADMIN_HTML } from './admin-ui.js';
 
 const VERSION = '1.0.0';
 const CHANNELS_KEY = 'data/channels.json';
@@ -160,12 +158,31 @@ function requireAdmin(env, request) {
 
 /* ---------------- 渠道路由与转发 ---------------- */
 
+/** 取渠道的全部可用 Key（去重）
+ *  支持写法：api_key: "sk-a" / api_key: "sk-a,sk-b" /
+ *            api_keys: ["sk-a", "sk-b"] / api_keys: "sk-a,sk-b"
+ *  api_key 与 api_keys 同时存在时合并 */
+function channelKeys(ch) {
+  const out = [];
+  const push = (v) => {
+    if (Array.isArray(v)) v.forEach(push);
+    else if (typeof v === 'string')
+      v.split(',').forEach((s) => {
+        s = s.trim();
+        if (s && !out.includes(s)) out.push(s);
+      });
+  };
+  push(ch.api_keys);
+  push(ch.api_key);
+  return out;
+}
+
 /** 按模型挑选可用渠道（优先级数字越小越优先）
  *  Anthropic 原生渠道仅支持 /v1/chat/completions（OpenAI 侧接口名） */
 function pickChannels(channels, model, path) {
   return (channels || [])
     .filter((c) => {
-      if (!c.enabled || !c.api_key || !c.base_url) return false;
+      if (!c.enabled || !c.base_url || !channelKeys(c).length) return false;
       const models = c.models || [];
       if (!models.includes('*') && !models.includes(model)) return false;
       if ((c.type || 'openai') === 'anthropic' && path !== '/v1/chat/completions')
@@ -463,29 +480,56 @@ async function forwardOpenAI(channel, path, payload) {
   if (body.model && channel.model_map && channel.model_map[body.model]) {
     body.model = channel.model_map[body.model];
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${channel.api_key}`,
-    },
-    body: JSON.stringify(body),
-  });
-  return { res, translated: false };
+  const keys = channelKeys(channel);
+  // 随机打散起始位置，多 Key 之间负载均衡
+  const start = Math.floor(Math.random() * keys.length);
+  let last = null;
+  for (let i = 0; i < keys.length; i++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${keys[(start + i) % keys.length]}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return { res, translated: false };
+    // 只有 401（Key 无效）/ 429（限流）才换下一个 Key 重试
+    if (res.status === 401 || res.status === 429) {
+      await res.text().catch(() => {});
+      last = res;
+      continue;
+    }
+    return { res, translated: false };
+  }
+  return { res: last, translated: false };
 }
 
 async function forwardAnthropic(channel, payload) {
   const url = channel.base_url.replace(/\/+$/, '') + '/v1/messages';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': channel.api_key,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(openaiToAnthropic(payload, channel)),
-  });
-  return { res, translated: true };
+  const body = JSON.stringify(openaiToAnthropic(payload, channel));
+  const keys = channelKeys(channel);
+  const start = Math.floor(Math.random() * keys.length);
+  let last = null;
+  for (let i = 0; i < keys.length; i++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': keys[(start + i) % keys.length],
+        'anthropic-version': '2023-06-01',
+      },
+      body,
+    });
+    if (res.ok) return { res, translated: true };
+    if (res.status === 401 || res.status === 429) {
+      await res.text().catch(() => {});
+      last = res;
+      continue;
+    }
+    return { res, translated: true };
+  }
+  return { res: last, translated: true };
 }
 
 /** 按渠道类型分发：openai 走 OpenAI 兼容接口，anthropic 走原生 /v1/messages 并翻译格式 */
@@ -789,13 +833,6 @@ export default {
         name: 'oneapi-gateway',
         version: VERSION,
         r2: 'bound',
-        admin: '/admin',
-      });
-    }
-
-    if (path === '/admin' && request.method === 'GET') {
-      return new Response(ADMIN_HTML, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS },
       });
     }
 
@@ -841,5 +878,5 @@ export default {
   },
 };
 
-// 导出纯翻译函数，便于单测（wrangler 只使用 default 导出）
-export { openaiToAnthropic, anthropicToOpenAI, anthropicStreamToOpenAI };
+// 导出纯函数，便于单测（wrangler 只使用 default 导出）
+export { openaiToAnthropic, anthropicToOpenAI, anthropicStreamToOpenAI, channelKeys };
