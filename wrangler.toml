@@ -1,0 +1,19 @@
+# oneapi-gateway — One-API 风格网关 (Cloudflare Workers + R2)
+#
+# 控制台连接 GitHub 部署时，本文件会被自动读取：
+#  - [[r2_buckets]] 绑定自动生效
+#  - bucket 本体由构建命令 `npm run build` → scripts/ensure-r2.mjs 自动创建（幂等）
+
+name = "oneapi-gateway"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# R2 绑定：网关的渠道配置、API Key、请求日志全部存放在这个桶里
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "oneapi-gateway-data"
+
+[vars]
+# ADMIN_KEY 不要写在这里！请在 Cloudflare 控制台
+# Settings → Variables and Secrets 中添加为 Secret。
+# 本地开发可在 .dev.vars 里写: ADMIN_KEY=xxx
