@@ -8,7 +8,9 @@ name = "oneapi-gateway"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# R2 绑定：网关的渠道配置、API Key、请求日志全部存放在这个桶里
+# R2 绑定：网关的渠道配置、密钥、设置、统计与请求日志全部存放在这个桶里
+#   data/channels.json · data/keys.json · data/settings.json
+#   data/stats/<日期>.json · logs/<日期>/
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "oneapi-gateway-data"
@@ -17,3 +19,6 @@ bucket_name = "oneapi-gateway-data"
 # ADMIN_KEY 不要写在这里！请在 Cloudflare 控制台
 # Settings → Variables and Secrets 中添加为 Secret。
 # 本地开发可在 .dev.vars 里写: ADMIN_KEY=xxx
+#
+# 其余运行时配置（超时、重试、日志保留期、模型定价等）无需改本文件，
+# 直接在管理后台「网关设置」页调整，保存在 R2 的 data/settings.json 中。

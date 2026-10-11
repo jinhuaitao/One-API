@@ -9,8 +9,10 @@
     "build": "node scripts/ensure-r2.mjs",
     "deploy": "node scripts/ensure-r2.mjs && wrangler deploy",
     "dev": "wrangler dev",
-    "ensure:r2": "node scripts/ensure-r2.mjs"
+    "ensure:r2": "node scripts/ensure-r2.mjs",
+    "test": "node test/smoke.mjs",
+    "preview": "node preview/build.mjs"
   },
   "type": "module",
-  "version": "1.0.0"
+  "version": "2.0.0"
 }
