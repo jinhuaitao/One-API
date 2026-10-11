@@ -252,6 +252,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .login-card input{margin-bottom:11px;text-align:center}
   .login-card button{width:100%}
   .login-tip{margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.6}
+  .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:8px;padding:9px 11px;text-align:left}
 
   /* ---------- help ---------- */
   .help h4{margin:20px 0 8px;font-size:14px}
@@ -294,7 +295,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     <p>请输入 Admin Key 以进入管理控制台</p>
     <input id="ak" type="password" placeholder="Admin Key" autocomplete="off">
     <button id="btnLogin">进入控制台</button>
-    <div class="login-tip">Admin Key 即部署时设置的 <code>ADMIN_KEY</code> Secret，仅保存在浏览器本地。</div>
+    <div class="login-tip">Admin Key 即部署时设置的 <code>ADMIN_KEY</code> Secret，仅保存在浏览器本地。登录后刷新页面无需重复输入（浏览器禁用本地存储时除外）。</div>
+    <div class="login-tip login-warn" id="storeWarn" style="display:none"></div>
   </div>
 </div>
 
@@ -532,7 +534,14 @@ var I = {
 /* ---------- 工具函数 ---------- */
 var store = {
   get: function(k){ try{ return window.localStorage.getItem(k); }catch(e){ return null; } },
-  set: function(k,v){ try{ window.localStorage.setItem(k,v); }catch(e){} },
+  /* 返回是否「确实写进去了」：隐私模式 / 第三方 iframe 下 localStorage 会静默失败，
+     此时刷新必然要求重新登录，需要明确告知用户，而不是让人反复试。 */
+  set: function(k,v){
+    try{
+      window.localStorage.setItem(k, v);
+      return window.localStorage.getItem(k) === v;
+    }catch(e){ return false; }
+  },
   del: function(k){ try{ window.localStorage.removeItem(k); }catch(e){} }
 };
 AK = store.get('og_admin_key') || '';
@@ -590,10 +599,52 @@ function api(path, method, body){
   if(body !== undefined){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   return fetch(path, opt).then(function(r){
     return r.json().catch(function(){ return { error: { message: '响应解析失败' } }; }).then(function(d){
-      if(!r.ok) throw new Error((d.error && d.error.message) || ('HTTP ' + r.status));
+      if(!r.ok){
+        var e = new Error((d.error && d.error.message) || ('HTTP ' + r.status));
+        e.status = r.status;
+        e.code = (d.error && d.error.code) || '';
+        // 只有 401/403 才说明 Key 失效；其余错误（5xx / 网络抖动）不应把用户踢出登录
+        if(r.status === 401 || r.status === 403) markLoggedOut(e.message);
+        throw e;
+      }
       return d;
     });
   });
+}
+function isAuthErr(e){ return !!e && (e.status === 401 || e.status === 403); }
+function isKeyMissing(e){ return !!e && e.code === 'admin_key_missing'; }
+
+/** Key 已失效：回到登录页（幂等，避免多个并发请求重复弹窗） */
+var authLost = false;
+function markLoggedOut(msg){
+  if(authLost) return;
+  authLost = true;
+  store.del('og_admin_key');
+  AK = '';
+  if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+  setConn('fail');
+  $('login').classList.add('on');
+  toast(msg || 'Admin Key 已失效，请重新输入', 'bad');
+}
+/** localStorage 是否真的可用（隐私模式 / 第三方 iframe 下会抛异常） */
+function storageOk(){
+  try{
+    window.localStorage.setItem('og_probe', '1');
+    window.localStorage.removeItem('og_probe');
+    return true;
+  }catch(e){ return false; }
+}
+/** localStorage 不可用时给出常驻提示：否则用户会以为「登录了但刷新就掉」，反复重试 */
+var storageWarned = false;
+function warnNoStorage(){
+  if(storageWarned) return;
+  storageWarned = true;
+  var el = $('storeWarn');
+  if(el){
+    el.textContent = '当前浏览器禁用了本地存储（隐私模式或第三方 iframe 内嵌），因此刷新页面后需要重新输入 Admin Key。请在新标签页直接打开本控制台。';
+    el.style.display = 'block';
+  }
+  toast('当前浏览器禁用了本地存储，刷新后需要重新输入 Admin Key', 'bad');
 }
 
 function openModal(html, size){
@@ -640,7 +691,8 @@ function setConn(state){
 }
 function doLogout(){
   store.del('og_admin_key');
-  AK = '';   S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
+  AK = '';   authLost = false;
+  S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
   if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
   var akInput = $('ak'); if(akInput) akInput.value = '';
   var di = $('logDate'); if(di) di.value = '';
@@ -650,48 +702,97 @@ function doLogout(){
   if(akInput){ try{ akInput.focus(); }catch(e){} }
   toast('已退出登录');
 }
+
+/** 逐个接口独立请求：某个接口挂了不影响其它数据，也不会把用户踢出登录。
+ *  返回「失败的接口清单」；只有在明确 401/403 时才 reject。 */
 function loadAll(){
-  return Promise.all([
-    api('/api/admin/channels'),
-    api('/api/admin/keys'),
-    api('/api/admin/settings'),
-    api('/api/admin/stats?days=' + RANGE),
-    api('/api/admin/logs/dates')
-  ]).then(function(res){
-    S.channels = res[0] || [];
-    S.keys = res[1] || [];
-    S.settings = res[2] || {};
-    S.stats = res[3] || null;
-    // 用服务端（按设置里的时区偏移）算出的「今天」作为默认查询日期，
-    // 避免浏览器时区与 Worker 的 UTC 时区不一致导致查不到刚产生的日志
-    S.serverToday = (res[4] && res[4].today) || todayLocal();
-    S.logDates = (res[4] && res[4].dates) || [];
+  var jobs = [
+    api('/api/admin/channels').then(function(v){ S.channels = v || []; }),
+    api('/api/admin/keys').then(function(v){ S.keys = v || []; }),
+    api('/api/admin/settings').then(function(v){ S.settings = v || {}; }),
+    api('/api/admin/stats?days=' + RANGE).then(function(v){ S.stats = v || null; }),
+    api('/api/admin/logs/dates').then(function(v){
+      // 用服务端（按设置里的时区偏移）算出的「今天」作为默认查询日期，
+      // 避免浏览器时区与 Worker 的 UTC 时区不一致导致查不到刚产生的日志
+      S.serverToday = (v && v.today) || todayLocal();
+      S.logDates = (v && v.dates) || [];
+    })
+  ];
+  var failed = [];
+  return Promise.all(jobs.map(function(p){
+    return p.catch(function(e){ failed.push(e); });
+  })).then(function(){
+    var authFail = failed.filter(isAuthErr)[0];
+    if(authFail) throw authFail;
     var di = $('logDate');
-    if(di && !di.value) di.value = S.serverToday;
+    if(di && !di.value) di.value = S.serverToday || todayLocal();
     S.logDate = di ? di.value : S.serverToday;
-    renderAll();
+    // 渲染异常不应被当成「登录失败」，单独兜住
+    try { renderAll(); } catch(re){ if(window.console) console.error('[render]', re); }
+    return failed;
   });
 }
+
+/** 鉴权探针：'ok' 有效 / 'bad' 明确无效 / 'unknown' 无法判定（网络故障等） */
+function probeAuth(){
+  return api('/api/admin/ping').then(function(){
+    return 'ok';
+  }).catch(function(e){
+    if(isAuthErr(e) || isKeyMissing(e)) return 'bad';
+    if(e.status === 404){
+      // 兼容尚未部署 ping 接口的旧版 Worker：退回用 settings 判断
+      return api('/api/admin/settings').then(function(){ return 'ok'; }).catch(function(e2){
+        if(isAuthErr(e2) || isKeyMissing(e2)) return 'bad';
+        return 'unknown';
+      });
+    }
+    return 'unknown';
+  });
+}
+
 function connect(silent){
   if(!AK){
     if(!silent) toast('请先输入 Admin Key', 'bad');
     $('login').classList.add('on');
     return;
   }
+  authLost = false;   // 本轮尝试重新计，用于判断是否已由 markLoggedOut 提示过
   setConn('wait');
-  loadAll().then(function(){
-    store.set('og_admin_key', AK);
+  probeAuth().then(function(auth){
+    if(auth === 'bad'){
+      // Key 确实无效（或服务端没配 ADMIN_KEY）才回登录页。
+      // 401 时 markLoggedOut 已经清过缓存并提示过，这里不重复弹 toast。
+      var alreadyTold = authLost;
+      authLost = true;
+      setConn('fail');
+      $('login').classList.add('on');
+      if(!alreadyTold) toast(silent ? '登录已失效，请重新输入 Admin Key' : 'Admin Key 不正确，请检查后重试', 'bad');
+      return;
+    }
+    // 'ok'：正常登录；'unknown'：服务端暂时连不上，但 Key 未必有问题 —— 保留登录态
+    authLost = false;
+    var remembered = store.set('og_admin_key', AK);
     $('login').classList.remove('on');
-    setConn('ok');
-  }).catch(function(e){
-    setConn('fail');
-    if(!silent) toast('连接失败：' + e.message, 'bad');
-    $('login').classList.add('on');
+    setConn(auth === 'ok' ? 'ok' : 'fail');
+    if(!remembered) warnNoStorage();
+    if(auth === 'unknown') toast('暂时无法连接服务端，已保留登录状态', 'bad');
+    return loadAll().then(function(failed){
+      if(failed && failed.length) toast(failed.length + ' 个接口暂时不可用，其余数据已正常显示', 'bad');
+    }).catch(function(e){
+      if(!isAuthErr(e)) toast(e.message, 'bad');
+    });
   });
 }
+
 function refresh(){
   if(!AK) return;
-  loadAll().then(function(){ toast('已刷新', 'ok'); }).catch(function(e){ toast(e.message, 'bad'); });
+  loadAll().then(function(failed){
+    if(failed && failed.length) toast(failed.length + ' 个接口暂时不可用，已显示其余数据', 'bad');
+    else toast('已刷新', 'ok');
+  }).catch(function(e){
+    // 只有 401/403 走到这里（markLoggedOut 已弹登录页），无需重复提示
+    if(!isAuthErr(e)) toast(e.message, 'bad');
+  });
 }
 
 /* ---------- 导航 ---------- */
@@ -1545,6 +1646,8 @@ document.addEventListener('input', function(e){
   // 日志日期不在这里写死：连接成功后由 loadAll() 用服务端（按设置的时区偏移）
   // 算出的「今天」填充，避免浏览器时区与 Worker 的 UTC 时区不一致
   $('logDate').value = '';
+  // 本地存储不可用就立刻说明白，别让用户以为「登录成功但一刷新就掉」
+  if(!storageOk()) warnNoStorage();
   $('btnTheme').addEventListener('click', function(){
     applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
     if(S.stats) renderTrend();

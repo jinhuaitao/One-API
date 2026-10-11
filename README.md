@@ -166,6 +166,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 | `POST /v1/embeddings` | 向量（需网关密钥） |
 | `GET/POST /api/admin/channels` | 渠道查询 / 覆盖保存 |
 | `GET/POST /api/admin/keys` | 密钥查询 / 覆盖保存 |
+| `GET /api/admin/ping` | 鉴权探针：只校验 `X-Admin-Key`，不读 R2。控制台用它单独判断登录态 |
 | `GET/POST /api/admin/settings` | 网关设置查询 / 保存 |
 | `GET /api/admin/stats?days=N` | 近 N 天聚合统计（含分模型/渠道/密钥明细） |
 | `GET /api/admin/logs/dates` | 有日志的日期列表 |
@@ -203,6 +204,11 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 - **为什么我填了映射，调用却提示 `no_channel`**：映射左侧的名称必须同时出现在该渠道的
   「对外暴露的模型名」中，否则网关匹配不到渠道。渠道编辑弹窗会在映射名称缺失时给出提示，
   可点「补全到模型列表」一键补齐。
+- **每次刷新都要重新输入 Admin Key**：正常情况不会。登录成功后 Key 存在浏览器 `localStorage`，
+  刷新时控制台先请求 `GET /api/admin/ping` 单独校验 Key，**只有明确返回 401/403 才会要求重新登录**；
+  某个数据接口（如统计、日志）临时报错只会提示「N 个接口暂时不可用」，不会把人踢出登录。
+  若仍然每次刷新都要重输，通常是浏览器禁用了本地存储（无痕模式，或在第三方 iframe 内嵌打开），
+  登录页会直接给出提示 —— 请在新标签页直接打开控制台地址。
 - **构建日志提示缺少 `CLOUDFLARE_ACCOUNT_ID`**：按上文第 2 步第 3 点补上构建环境变量后重新部署。
 - **想换 bucket 名字**：改 `wrangler.toml` 里的 `bucket_name` 即可，下次构建会自动创建新桶并绑定。
 - **流式请求的 token 用量**：网关会在转发流式请求时带上 `stream_options: {include_usage: true}`，

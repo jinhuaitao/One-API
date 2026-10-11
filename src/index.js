@@ -1429,6 +1429,14 @@ async function handleAdmin(env, ctx, request) {
   const path = url.pathname;
   const gate = requireAdmin(env, request);
   if (!gate.ok) return gate.res;
+
+  /* ---- 鉴权探针 ----
+   * 不读 R2、不依赖任何数据，用于控制台单独判断「这个 Admin Key 是否有效」。
+   * 这样「数据接口临时故障」就不会被误判成「登录失效」。 */
+  if (path === '/api/admin/ping') {
+    return json({ ok: true, time: nowIso() });
+  }
+
   const settings = await loadSettings(env);
 
   /* ---- 设置 ---- */
