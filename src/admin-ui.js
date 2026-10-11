@@ -466,7 +466,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <li><b>优先级 + 权重</b>：先按 <code>priority</code>（越小越优先）分组，组内按 <code>weight</code> 加权随机，实现灰度与负载分摊。</li>
             <li><b>多 Key</b>：单个渠道的 API Key 支持英文逗号分隔多个，随机起点轮询，单个 Key 失败自动换下一个。</li>
             <li><b>重试</b>：429 / 5xx / 网络异常会在同一 Key 上重试（次数可在「网关设置」调整）。</li>
-            <li><b>模型映射</b>：网关模型名 → 渠道真实模型名，例如对外叫 <code>gpt-4o-mini</code>，实际走 <code>gpt-4o-mini-2024</code>。</li>
+            <li><b>模型映射</b>：网关模型名 → 渠道真实模型名，例如对外叫 <code>gpt-4o-mini</code>，实际走 <code>gpt-4o-mini-2024</code>。映射左侧的名称必须同时出现在渠道的「对外暴露的模型名」中，否则匹配不到该渠道。</li>
+            <li><b>模型回显</b>：响应体与流式 SSE 中的 <code>model</code> 会统一改写为调用方请求的网关模型名，调用方不会看到渠道内部的真实模型名。</li>
           </ul>
           <h4>Anthropic 渠道注意事项</h4>
           <ul>
