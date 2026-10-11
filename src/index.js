@@ -957,6 +957,22 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
     clearKa();
   };
 
+  /** 异常收尾报文：一个可解析的 error 事件 + [DONE]，让调用方拿到明确结束而非 TCP 重置 */
+  const tail = (reason) => {
+    const message =
+      reason === 'timeout'
+        ? '上游超过静默超时未返回数据，网关已中断本次流式响应'
+        : '上游流式响应中途中断，网关已提前结束本次流式响应';
+    return (
+      'data: ' +
+      JSON.stringify({
+        error: { message, type: 'gateway_stream_error', code: reason },
+      }) +
+      '\n\n' +
+      'data: [DONE]\n\n'
+    );
+  };
+
   /** 武装下游保活：每 keepaliveMs 检查一次，期间没有向调用方写过字节就补一条 SSE 注释 */
   const armKa = () => {
     if (!keepaliveMs || closed) return;
