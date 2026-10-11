@@ -97,6 +97,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .badge.info{background:var(--accent-soft);color:var(--accent);border-color:transparent}
   .badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
   .chip{display:inline-block;padding:2px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--border);font-size:11.5px;margin:1px 3px 1px 0;color:var(--text2);font-family:var(--mono)}
+  .chip .nm{white-space:nowrap}
   .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;background:var(--border2)}
   .dot.ok{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
   .dot.bad{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
@@ -163,18 +164,21 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
   /* ---------- tables ---------- */
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:11px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+  th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--border);vertical-align:middle}
   th{color:var(--muted);font-weight:600;font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.04em}
   tbody tr{transition:background .12s var(--ease)}
   tbody tr:hover{background:var(--hover)}
   tbody tr:last-child td{border-bottom:none}
   td.mono{font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--text2)}
   .ops{white-space:nowrap;display:flex;gap:5px;align-items:center}
+  .ops.r{justify-content:flex-end}
+  th.ar,td.ar{text-align:right}
   .empty{padding:44px 10px;text-align:center;color:var(--muted);font-size:13px}
   .empty svg{width:30px;height:30px;margin-bottom:10px;opacity:.5}
   .tname{display:flex;align-items:center;gap:9px;min-width:0}
+  .tname>div{min-width:0}
   .tname b{font-weight:600;white-space:nowrap}
-  .tname .sub{font-size:11.5px;color:var(--muted);display:block;font-weight:400;margin-top:2px;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tname .sub{font-size:11.5px;color:var(--muted);display:block;font-weight:400;margin-top:2px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .quota{display:flex;align-items:center;gap:8px;min-width:130px}
   .progress{flex:1;height:6px;background:var(--input);border-radius:4px;overflow:hidden;border:1px solid var(--border)}
   .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:4px;transition:width .3s var(--ease)}
@@ -185,7 +189,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   #chTable,#keyTable,#logTable{overflow-x:auto}
   .nowrap{white-space:nowrap}
   .sub{font-size:11.5px;color:var(--muted);display:block;margin-top:2px;font-weight:400}
-  .url{font-family:var(--mono);font-size:12px;color:var(--text2);display:block;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .url{font-family:var(--mono);font-size:12px;color:var(--text2);display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .phead{display:flex;gap:8px;font-size:11.5px;color:var(--muted);padding:0 0 7px;text-transform:uppercase;letter-spacing:.04em}
   .phead span{flex:1}
   .phead span:last-child{flex:0 0 34px;width:34px}
@@ -805,9 +809,9 @@ function renderOverview(){
   $('ovKeys').innerHTML = keys.length ? miniTable(keys, ['密钥', '请求', 'Tokens', '费用']) : '<div class="empty">' + I.inbox + '<div>暂无数据</div></div>';
 }
 function miniTable(rows, cols){
-  var h = '<table><thead><tr><th>' + cols[0] + '</th><th>' + cols[1] + '</th><th>' + cols[2] + '</th><th>' + cols[3] + '</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="min-width:150px">' + cols[0] + '</th><th class="ar">' + cols[1] + '</th><th class="ar">' + cols[2] + '</th><th class="ar">' + cols[3] + '</th></tr></thead><tbody>';
   rows.forEach(function(r){
-    h += '<tr><td class="mono">' + esc(r.name) + '</td><td>' + fmtNum(r.requests) + '</td><td>' + fmtNum(r.tokens) + '</td><td>$' + fmtCost(r.cost) + '</td></tr>';
+    h += '<tr><td class="mono">' + esc(r.name) + '</td><td class="ar">' + fmtNum(r.requests) + '</td><td class="ar">' + fmtNum(r.tokens) + '</td><td class="ar">$' + fmtCost(r.cost) + '</td></tr>';
   });
   return h + '</tbody></table>';
 }
@@ -823,8 +827,9 @@ function modelChips(c){
   var out = models.slice(0, 3).map(function(m){
     var t = map[m];
     var renamed = t && t !== m;
-    return '<span class="chip" title="' + esc(renamed ? '对外名称 ' + m + ' → 上游真实模型 ' + t : m) + '">' + esc(m) +
-      (renamed ? ' <span class="muted">→ ' + esc(t) + '</span>' : '') + '</span>';
+    return '<span class="chip" title="' + esc(renamed ? '对外名称 ' + m + ' → 上游真实模型 ' + t : m) + '">' +
+      '<span class="nm">' + esc(m) + '</span>' +
+      (renamed ? ' <span class="nm muted">→ ' + esc(t) + '</span>' : '') + '</span>';
   }).join('');
   if(models.length > 3) out += '<span class="chip">+' + (models.length - 3) + '</span>';
   return out;
@@ -846,7 +851,7 @@ function filteredChannels(){
 }
 function renderChannels(){
   var list = filteredChannels();
-  var h = '<table><thead><tr><th style="width:56px">状态</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th style="width:92px">优先级</th><th style="width:96px">健康</th><th style="width:190px">操作</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:170px">名称</th><th style="width:112px">类型</th><th style="min-width:140px">Base URL</th><th style="width:220px">模型</th><th class="ar" style="width:76px">优先级</th><th style="width:72px">健康</th><th class="ar" style="width:172px">操作</th></tr></thead><tbody>';
   if(!list.length){
     h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + (S.channels.length ? '没有符合筛选条件的渠道' : '暂无渠道，点击右上角「添加渠道」创建') + '</div></div></td></tr>';
   }
@@ -854,15 +859,16 @@ function renderChannels(){
     var c = o.c, i = o.i;
     var hh = c.health;
     var hb = hh ? (hh.ok ? '<span class="badge ok">正常</span>' : '<span class="badge bad" title="' + esc(hh.message || '') + '">异常</span>') : '<span class="badge">-</span>';
+    var subTxt = 'API Key × ' + String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length + (hh && hh.checked_at ? ' · 测试于 ' + fmtTime(hh.checked_at) : '');
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-ch" data-i="' + i + '"' + (c.enabled ? ' checked' : '') + '><span></span></label></td>' +
-      '<td><div class="tname"><div><b>' + esc(c.name) + '</b><span class="sub">API Key × ' + String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length + (hh && hh.checked_at ? ' · 测试于 ' + esc(fmtTime(hh.checked_at)) : '') + '</span></div></div></td>' +
+      '<td><div class="tname"><div><b>' + esc(c.name) + '</b><span class="sub" title="' + esc(subTxt) + '">' + esc(subTxt) + '</span></div></div></td>' +
       '<td>' + typeBadge(c) + '</td>' +
       '<td><span class="url" title="' + esc(c.base_url) + '">' + esc(c.base_url) + '</span></td>' +
       '<td>' + modelChips(c) + '</td>' +
-      '<td>' + esc(c.priority == null ? 100 : c.priority) + ' <span class="muted">/ w' + esc(c.weight || 1) + '</span></td>' +
+      '<td class="ar nowrap">' + esc(c.priority == null ? 100 : c.priority) + ' <span class="muted">/ w' + esc(c.weight || 1) + '</span></td>' +
       '<td>' + hb + '</td>' +
-      '<td><div class="ops"><button class="ghost sm" data-act="test-ch" data-i="' + i + '">测试</button>' +
+      '<td><div class="ops r"><button class="ghost sm" data-act="test-ch" data-i="' + i + '">测试</button>' +
       '<button class="ghost sm" data-act="edit-ch" data-i="' + i + '">编辑</button>' +
       '<button class="soft sm" data-act="del-ch" data-i="' + i + '">删除</button></div></td></tr>';
   });
@@ -1073,7 +1079,7 @@ function filteredKeys(){
 }
 function renderKeys(){
   var list = filteredKeys();
-  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:150px">名称</th><th style="min-width:150px">密钥</th><th style="width:130px">配额</th><th style="width:150px">已用 Tokens</th><th style="width:90px">有效期</th><th style="width:230px">操作</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:150px">名称</th><th style="min-width:150px">密钥</th><th style="width:132px">配额</th><th class="ar" style="width:152px">已用 Tokens</th><th style="width:108px">有效期</th><th class="ar" style="width:212px">操作</th></tr></thead><tbody>';
   if(!list.length){
     h += '<tr><td colspan="7"><div class="empty">' + I.inbox + '<div>' + (S.keys.length ? '没有符合筛选条件的密钥' : '暂无密钥，点击右上角「生成密钥」创建') + '</div></div></td></tr>';
   }
@@ -1091,9 +1097,9 @@ function renderKeys(){
       '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub" title="' + esc(subs.join(' · ')) + '">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
       '<td class="mono nowrap">' + esc(maskKey(k.key)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制完整密钥"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
       '<td>' + quotaCell(k) + '</td>' +
-      '<td class="nowrap">' + fmtNum(k.used_tokens) + (k.quota_tokens > 0 ? ' <span class="muted">/ ' + fmtNum(k.quota_tokens) + '</span>' : '') + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
-      '<td>' + expTxt + '</td>' +
-      '<td><div class="ops"><button class="ghost sm" data-act="edit-key" data-i="' + i + '">编辑</button>' +
+      '<td class="nowrap ar">' + fmtNum(k.used_tokens) + (k.quota_tokens > 0 ? ' <span class="muted">/ ' + fmtNum(k.quota_tokens) + '</span>' : '') + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
+      '<td class="nowrap">' + expTxt + '</td>' +
+      '<td><div class="ops r"><button class="ghost sm" data-act="edit-key" data-i="' + i + '">编辑</button>' +
       '<button class="ghost sm" data-act="curl-key" data-i="' + i + '">示例</button>' +
       '<button class="ghost sm" data-act="reset-key" data-i="' + i + '">清零</button>' +
       '<button class="soft sm" data-act="del-key" data-i="' + i + '">删除</button></div></td></tr>';
@@ -1219,7 +1225,7 @@ function loadLogs(silent){
 }
 var LOGF = { ok:'', stream:'', model:'', q:'' };
 function renderLogs(){
-  var h = '<table><thead><tr><th style="width:150px">时间</th><th>调用方</th><th>模型</th><th>渠道</th><th style="width:88px">结果</th><th style="width:92px">Tokens</th><th style="width:80px">耗时</th><th style="width:70px">操作</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="width:150px">时间</th><th style="min-width:150px">调用方</th><th style="min-width:150px">模型</th><th style="width:206px">渠道</th><th style="width:88px">结果</th><th class="ar" style="width:96px">Tokens</th><th class="ar" style="width:84px">耗时</th><th class="ar" style="width:76px">操作</th></tr></thead><tbody>';
   if(!S.logs.length){
     h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + esc(S.logDate || '') + ' 暂无符合条件的请求日志</div><div id="logEmptyHint" style="margin-top:12px"></div></div></td></tr>';
   }
@@ -1229,9 +1235,9 @@ function renderLogs(){
       '<td class="mono">' + esc(l.model || '-') + '</td>' +
       '<td>' + esc(l.channel || '-') + (l.stream ? ' <span class="chip">流式</span>' : '') + (l.retries ? ' <span class="chip">重试' + l.retries + '</span>' : '') + '</td>' +
       '<td>' + (l.ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad" title="' + esc(l.error) + '">失败</span>') + '</td>' +
-      '<td>' + fmtNum(l.tokens) + '</td>' +
-      '<td>' + esc(fmtMs(l.ms)) + '</td>' +
-      '<td><button class="ghost sm" data-act="view-log" data-i="' + i + '">详情</button></td></tr>';
+      '<td class="ar">' + fmtNum(l.tokens) + '</td>' +
+      '<td class="ar nowrap">' + esc(fmtMs(l.ms)) + '</td>' +
+      '<td class="ar"><button class="ghost sm" data-act="view-log" data-i="' + i + '">详情</button></td></tr>';
   });
   $('logTable').innerHTML = h + '</tbody></table>';
   $('logPager').innerHTML = S.logCursor ? '<button class="ghost sm" data-act="log-more">加载更早的日志</button>' : (S.logs.length ? '<span class="muted" style="font-size:12px">已到当日日志末尾</span>' : '');
