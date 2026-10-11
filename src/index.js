@@ -672,13 +672,48 @@ function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
 }
 
 /**
- * 监听 OpenAI SSE 流并提取最后的 usage 数据（需上游支持 stream_options.include_usage，
- * 上游会在 [DONE] 前发送一个只带 usage 的 chunk）。
- * 数据原样透传给客户端，不影响流式体验；流结束（或中断）时通过 onUsage 回调返回
- * {prompt_tokens, completion_tokens, total_tokens}，拿不到则为 null。
+ * 把单个 SSE 数据块里的 model 字段改写为「网关模型名」，顺带提取 usage。
+ *
+ * - 只有当整块都由 data: 行组成、且每行都是合法 JSON 时才重写（保留 [DONE]）；
+ *   出现 event: / id: / retry: 或非 JSON 数据时，整块原样返回，避免破坏协议。
+ * - usage 提取依赖上游支持 stream_options.include_usage（[DONE] 前会有一个只带 usage 的 chunk）。
  */
-function tapOpenAISSEUsage(upstreamBody, onUsage) {
+function rewriteSseBlock(raw, model, onUsage) {
+  const lines = raw.split('\n');
+  const out = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    if (!t.startsWith('data:')) return raw; // 非纯 data 块，原样透传
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') {
+      out.push('data: [DONE]');
+      continue;
+    }
+    let obj = null;
+    try {
+      obj = JSON.parse(payload);
+    } catch {
+      return raw; // 非 JSON，原样透传
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return raw;
+    if (obj.usage && typeof obj.usage.total_tokens === 'number') onUsage(obj.usage);
+    // 回显网关模型名，让调用方看到的始终是自己请求的那个名字
+    if (obj.model !== undefined) obj.model = model;
+    out.push('data: ' + JSON.stringify(obj));
+  }
+  return out.length ? out.join('\n') : raw;
+}
+
+/**
+ * 透传 OpenAI SSE 流：逐块改写 model 为网关模型名，并提取末尾的 usage。
+ * 数据内容除 model 字段外保持不变，不影响流式体验；
+ * 流结束（或中断）时通过 onUsage 回调返回 {prompt_tokens, completion_tokens, total_tokens}，
+ * 拿不到则为 null。
+ */
+function rewriteOpenAISSE(upstreamBody, model, onUsage = () => {}) {
   const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   let buffer = '';
   let usage = null;
   let settled = false;
@@ -691,32 +726,24 @@ function tapOpenAISSEUsage(upstreamBody, onUsage) {
       // 忽略
     }
   };
+  const capture = (u) => {
+    usage = u;
+  };
 
   const transform = new TransformStream({
     transform(bytes, controller) {
-      controller.enqueue(bytes);
       buffer += decoder.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n');
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        let data = '';
-        for (const line of raw.split('\n')) {
-          const t = line.trim();
-          if (t.startsWith('data:')) data += t.slice(5).trim();
-        }
-        if (!data || data === '[DONE]') continue;
-        try {
-          const obj = JSON.parse(data);
-          if (obj && obj.usage && typeof obj.usage.total_tokens === 'number') {
-            usage = obj.usage;
-          }
-        } catch {
-          // 忽略无法解析的事件
-        }
+        controller.enqueue(encoder.encode(rewriteSseBlock(raw, model, capture) + '\n\n'));
       }
     },
-    flush() {
+    flush(controller) {
+      if (buffer.trim()) {
+        controller.enqueue(encoder.encode(rewriteSseBlock(buffer, model, capture)));
+      }
       done(usage);
     },
   });
@@ -1025,7 +1052,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             });
             const streamBody = translated
               ? anthropicStreamToOpenAI(upstream.body, body.model, (u) => resolveUsage(u))
-              : tapOpenAISSEUsage(upstream.body, (u) => resolveUsage(u));
+              : rewriteOpenAISSE(upstream.body, body.model, (u) => resolveUsage(u));
             ctx.waitUntil(
               usagePromise
                 .then((usage) =>
@@ -1059,6 +1086,11 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
           const data = translated
             ? anthropicToOpenAI(await upstream.json(), body.model)
             : await upstream.json();
+          // 回显网关模型名：上游可能把 model 改写为真实模型名（如 deepseek-v4-flash-0731），
+          // 这里统一还原为调用方请求的名字，避免调用方看到渠道内部名称
+          if (data && typeof data === 'object' && !Array.isArray(data) && data.model !== undefined) {
+            data.model = body.model;
+          }
           recordRequest(env, ctx, {
             auth,
             settings,
@@ -1636,6 +1668,7 @@ export {
   openaiToAnthropic,
   anthropicToOpenAI,
   anthropicStreamToOpenAI,
+  rewriteSseBlock,
   usageCost,
   normalizeSettings,
   pickChannels,

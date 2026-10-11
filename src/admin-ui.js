@@ -792,10 +792,16 @@ function miniTable(rows, cols){
 function typeBadge(c){
   return c.type === 'anthropic' ? '<span class="badge info">Anthropic 原生</span>' : '<span class="badge">OpenAI 兼容</span>';
 }
-function modelChips(models){
-  models = models || [];
+function modelChips(c){
+  var models = (c && c.models) || [];
   if(!models.length) return '<span class="muted">-</span>';
-  var out = models.slice(0, 3).map(function(m){ return '<span class="chip">' + esc(m) + '</span>'; }).join('');
+  var map = (c && c.model_map) || {};
+  var out = models.slice(0, 3).map(function(m){
+    var t = map[m];
+    var renamed = t && t !== m;
+    return '<span class="chip" title="' + esc(renamed ? '对外名称 ' + m + ' → 上游真实模型 ' + t : m) + '">' + esc(m) +
+      (renamed ? ' <span class="muted">→ ' + esc(t) + '</span>' : '') + '</span>';
+  }).join('');
   if(models.length > 3) out += '<span class="chip">+' + (models.length - 3) + '</span>';
   return out;
 }
@@ -829,7 +835,7 @@ function renderChannels(){
       '<td><div class="tname"><div><b>' + esc(c.name) + '</b><span class="sub">API Key × ' + String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length + (hh && hh.checked_at ? ' · 测试于 ' + esc(fmtTime(hh.checked_at)) : '') + '</span></div></div></td>' +
       '<td>' + typeBadge(c) + '</td>' +
       '<td><span class="url" title="' + esc(c.base_url) + '">' + esc(c.base_url) + '</span></td>' +
-      '<td>' + modelChips(c.models) + '</td>' +
+      '<td>' + modelChips(c) + '</td>' +
       '<td>' + esc(c.priority == null ? 100 : c.priority) + ' <span class="muted">/ w' + esc(c.weight || 1) + '</span></td>' +
       '<td>' + hb + '</td>' +
       '<td><div class="ops"><button class="ghost sm" data-act="test-ch" data-i="' + i + '">测试</button>' +
@@ -845,9 +851,41 @@ function mapRowsHtml(map){
   return rows || '';
 }
 function mapRowHtml(k, v){
-  return '<div class="maprow"><input class="m_k" type="text" placeholder="网关模型名" value="' + esc(k || '') + '">' +
+  return '<div class="maprow"><input class="m_k" list="m_modelList" type="text" placeholder="对外名称（网关模型名）" value="' + esc(k || '') + '">' +
     '<span class="muted">→</span><input class="m_v" type="text" placeholder="渠道真实模型名" value="' + esc(v || '') + '">' +
     '<button class="icon-btn" data-act="map-del" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>';
+}
+/** 把「对外暴露的模型名」灌进 datalist，供映射左侧直接选择 */
+function syncModelList(){
+  var dl = $('m_modelList'); if(!dl) return;
+  var models = ($('m_models').value || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  dl.innerHTML = models.map(function(m){ return '<option value="' + esc(m) + '"></option>'; }).join('');
+}
+/** 提示映射左侧名称是否已包含在「对外暴露的模型名」中，并提供一键补全 */
+function refreshMapHint(){
+  var box = $('mapHint'); if(!box) return;
+  var models = ($('m_models').value || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  var missing = [];
+  document.querySelectorAll('#mapRows .m_k').forEach(function(inp){
+    var v = inp.value.trim();
+    if(v && models.indexOf(v) < 0 && models.indexOf('*') < 0 && missing.indexOf(v) < 0) missing.push(v);
+  });
+  if(!missing.length){
+    box.innerHTML = '左侧填「对外暴露的模型名」，右侧填渠道真实模型名；两者相同时可省略该行。';
+    return;
+  }
+  box.innerHTML = '<span class="warnc">以下映射的左侧名称不在「对外暴露的模型名」中，调用方用这些名字会匹配不到本渠道：' + esc(missing.join('、')) + '</span> ' +
+    '<button class="ghost sm" data-act="map-sync">补全到模型列表</button>';
+}
+function mapSync(){
+  var models = ($('m_models').value || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  document.querySelectorAll('#mapRows .m_k').forEach(function(inp){
+    var v = inp.value.trim();
+    if(v && models.indexOf(v) < 0) models.push(v);
+  });
+  $('m_models').value = models.join(',');
+  syncModelList();
+  refreshMapHint();
 }
 function hdrRowHtml(k, v){
   return '<div class="hdrrow"><input class="h_k" type="text" placeholder="Header 名称" value="' + esc(k || '') + '">' +
@@ -870,10 +908,13 @@ function openChannelModal(i){
     '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="m_enabled" type="checkbox"' + (c.enabled !== false ? ' checked' : '') + '> 启用该渠道</label>' +
     '</div>' +
     '<label class="fld">渠道 API Key（多个 Key 用英文逗号 , 分隔）<textarea id="m_key" rows="2" placeholder="sk-aaa,sk-bbb">' + esc(c.api_key || '') + '</textarea></label>' +
-    '<label class="fld">支持的模型（逗号分隔，* 表示全部）<input id="m_models" type="text" value="' + esc((c.models || []).join(',')) + '" placeholder="gpt-4o-mini,gpt-4o"></label>' +
-    '<div class="fld"><div class="toolbar" style="margin-bottom:6px"><span style="font-size:12.5px;color:var(--text2)">模型映射（网关模型名 → 渠道真实模型名）</span><div class="spacer"></div><button class="ghost sm" data-act="map-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>添加映射</button></div><div id="mapRows">' + mapRowsHtml(c.model_map) + '</div></div>' +
+    '<label class="fld">对外暴露的模型名（网关模型名，逗号分隔，* 表示全部）<input id="m_models" type="text" value="' + esc((c.models || []).join(',')) + '" placeholder="DeepSeek-V4-Flash,Agents-A1"><span class="hint">调用方用这里的名字请求网关，它同时决定该渠道能被哪些模型名匹配到。</span></label>' +
+    '<div class="fld"><div class="toolbar" style="margin-bottom:6px"><span style="font-size:12.5px;color:var(--text2)">模型映射（对外名称 → 渠道真实模型名）</span><div class="spacer"></div><button class="ghost sm" data-act="map-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>添加映射</button></div><div id="mapRows">' + mapRowsHtml(c.model_map) + '</div><div class="hint" id="mapHint"></div></div>' +
+    '<datalist id="m_modelList"></datalist>' +
     '<div class="fld"><div class="toolbar" style="margin-bottom:6px"><span style="font-size:12.5px;color:var(--text2)">附加请求头（可选，随请求发送给上游）</span><div class="spacer"></div><button class="ghost sm" data-act="hdr-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>添加请求头</button></div><div id="hdrRows">' + Object.keys(c.headers || {}).map(function(k){ return hdrRowHtml(k, c.headers[k]); }).join('') + '</div></div>' +
     '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-ch">保存渠道</button></div>', 'lg');
+  syncModelList();
+  refreshMapHint();
 }
 function readPairs(containerId, kClass, vClass){
   var out = {};
@@ -1320,8 +1361,9 @@ document.addEventListener('click', function(e){
   else if(act === 'route-test') routeTest();
   else if(act === 'run-route-test') runRouteTest(el);
   else if(act === 'save-ch') saveChannel();
-  else if(act === 'map-add') $('mapRows').insertAdjacentHTML('beforeend', mapRowHtml('', ''));
-  else if(act === 'map-del') el.closest('.maprow').remove();
+  else if(act === 'map-add'){ $('mapRows').insertAdjacentHTML('beforeend', mapRowHtml('', '')); refreshMapHint(); }
+  else if(act === 'map-del'){ el.closest('.maprow').remove(); refreshMapHint(); }
+  else if(act === 'map-sync') mapSync();
   else if(act === 'hdr-add') $('hdrRows').insertAdjacentHTML('beforeend', hdrRowHtml('', ''));
   else if(act === 'hdr-del') el.closest('.hdrrow').remove();
   else if(act === 'export') exportConfig();
@@ -1393,6 +1435,14 @@ document.addEventListener('change', function(e){
     if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
     if(el.checked){ autoTimer = setInterval(function(){ if($('t-logs').classList.contains('on')) loadLogs(true); }, 10000); toast('已开启自动刷新（10 秒）'); }
   }
+});
+
+/* 渠道弹窗内联动：改「对外暴露的模型名」→ 刷新 datalist 与映射提示 */
+document.addEventListener('input', function(e){
+  var el = e.target;
+  if(!el || !$('modal').classList.contains('on')) return;
+  if(el.id === 'm_models'){ syncModelList(); refreshMapHint(); }
+  else if(el.classList && el.classList.contains('m_k')){ refreshMapHint(); }
 });
 
 /* 筛选即时生效 */
