@@ -17,6 +17,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <style>
   :root{
     --radius:12px; --radius-sm:8px;
+    --headh:70px;      /* 侧栏品牌区 / 顶栏 统一高度，保证两条下边框对齐 */
+    --gutter:26px;     /* 主区左右留白（顶栏与内容区共用，避免错位） */
     --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
     --ease:cubic-bezier(.4,0,.2,1);
@@ -55,29 +57,31 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
   /* ---------- sidebar ---------- */
   .sidebar{width:238px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
-  .brand{padding:20px 18px;display:flex;align-items:center;gap:11px;border-bottom:1px solid var(--border)}
+  .brand{height:var(--headh);flex-shrink:0;padding:0 22px;display:flex;align-items:center;gap:11px;border-bottom:1px solid var(--border)}
   .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:14px;flex-shrink:0;letter-spacing:.5px;box-shadow:0 6px 16px var(--accent-soft)}
-  .brand b{font-size:14.5px;display:block;letter-spacing:.2px}
-  .brand span{font-size:11px;color:var(--muted)}
-  .nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow:auto}
-  .navsec{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;padding:12px 12px 6px}
-  .navbtn{display:flex;align-items:center;gap:11px;width:100%;background:none;border:none;color:var(--text2);padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;font-size:13.5px;text-align:left;font-family:inherit;transition:background .15s var(--ease),color .15s var(--ease)}
+  .brand b{font-size:14.5px;display:block;letter-spacing:.2px;line-height:1.35}
+  .brand span{font-size:11px;color:var(--muted);line-height:1.35}
+  .nav{padding:10px 10px 16px;display:flex;flex-direction:column;gap:2px;flex:1;overflow:auto}
+  .navsec{font-size:10.5px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.08em;padding:14px 14px 6px}
+  .navsec:first-child{padding-top:6px}
+  .navbtn{display:flex;align-items:center;justify-content:flex-start;gap:11px;width:100%;background:none;border:none;color:var(--text2);padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;font-size:13.5px;line-height:1.4;text-align:left;font-family:inherit;transition:background .15s var(--ease),color .15s var(--ease)}
   .navbtn:hover{background:var(--hover);color:var(--text)}
   .navbtn.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
   .navbtn .badge-n{margin-left:auto;font-size:11px;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:1px 7px;border-radius:20px}
   .navbtn.on .badge-n{background:var(--accent);border-color:transparent;color:#fff}
-  .side-foot{padding:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
-  .side-row{display:flex;gap:8px;align-items:center}
+  .side-foot{padding:12px 10px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
+  .side-row{display:flex;gap:8px;align-items:center;padding:0 12px}
   .side-row .grow{flex:1;min-width:0;font-size:11.5px;color:var(--muted);line-height:1.5}
   .side-row .grow b{display:block;color:var(--text2);font-weight:600;font-size:12px}
 
   /* ---------- main / topbar ---------- */
   main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .topbar{padding:15px 26px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--panel);position:sticky;top:0;z-index:20;gap:16px}
-  .topbar h2{margin:0;font-size:16.5px;letter-spacing:.2px}
-  .topbar p{margin:2px 0 0;font-size:12px;color:var(--muted)}
-  .topbar .right{display:flex;gap:9px;align-items:center}
-  .content{padding:22px 26px 60px;max-width:1240px;width:100%;margin:0 auto}
+  .topbar{height:var(--headh);flex-shrink:0;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:20}
+  .topbar-in{max-width:1240px;margin:0 auto;height:100%;padding:0 var(--gutter);display:flex;justify-content:space-between;align-items:center;gap:16px}
+  .topbar h2{margin:0;font-size:16.5px;letter-spacing:.2px;line-height:1.3}
+  .topbar p{margin:2px 0 0;font-size:12px;color:var(--muted);line-height:1.3}
+  .topbar .right{display:flex;gap:9px;align-items:center;flex-shrink:0}
+  .content{padding:22px var(--gutter) 60px;max-width:1240px;width:100%;margin:0 auto}
   .tab{display:none}.tab.on{display:block;animation:fade .22s var(--ease)}
   @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
@@ -98,8 +102,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .dot.bad{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
 
   /* ---------- stats ---------- */
-  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
-  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;position:relative;overflow:hidden}
   .stat .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
   .stat .label{color:var(--muted);font-size:12.5px}
   .stat .ic{width:30px;height:30px;border-radius:9px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center}
@@ -259,17 +263,20 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .grid2{grid-template-columns:1fr}
   }
   @media (max-width:860px){
+    :root{--headh:62px;--gutter:16px}
     .app{flex-direction:column}
     .sidebar{width:100%;height:auto;position:static}
+    .brand{padding:0 16px}
     .nav{flex-direction:row;overflow-x:auto;padding:10px}
     .navsec{display:none}
     .navbtn{white-space:nowrap;width:auto}
     .side-foot{flex-direction:row;align-items:center}
+    .side-row{padding:0}
     .side-row .grow{display:none}
     .stats{grid-template-columns:1fr}
     .grid{grid-template-columns:1fr}
-    .content{padding:16px}
-    .topbar{padding:13px 16px}
+    .content{padding:16px var(--gutter) 40px}
+    .topbar-in{padding:0 var(--gutter)}
     .topbar p{display:none}
   }
 </style>
@@ -311,10 +318,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   </aside>
   <main>
     <div class="topbar">
-      <div><h2 id="pageTitle">概览</h2><p id="pageDesc">网关运行状态与用量趋势</p></div>
-      <div class="right">
-        <span class="pill" id="connPill"><span class="dt"></span>未连接</span>
-        <button class="icon-btn" id="btnRefresh" title="刷新数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
+      <div class="topbar-in">
+        <div><h2 id="pageTitle">概览</h2><p id="pageDesc">网关运行状态与用量趋势</p></div>
+        <div class="right">
+          <span class="pill" id="connPill"><span class="dt"></span>未连接</span>
+          <button class="icon-btn" id="btnRefresh" title="刷新数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
+        </div>
       </div>
     </div>
     <div class="content">
