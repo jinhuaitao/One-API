@@ -178,6 +178,15 @@ function defaultSettings() {
      * 因此流式必须单独有这个读超时。
      */
     stream_idle_timeout_ms: 60000,
+    /**
+     * 流式响应的「下游保活间隔」（毫秒）：网关超过该时长没有向调用方下发任何字节时，
+     * 主动补一条 SSE 注释（`: ka\n\n`）。标准 SSE 客户端会忽略注释行，
+     * 但链路上的 nginx / CDN / 客户端读超时因此不会遇到「零字节窗口」，
+     * 模型长思考、上游排队时不再被中途掐断。
+     * 与 stream_idle_timeout_ms 互补：后者管「上游→网关」，本项管「网关→调用方」。
+     * 0 = 关闭。
+     */
+    stream_keepalive_ms: 15000,
     /** 请求日志保留天数（供「清理日志」使用） */
     log_retention_days: 30,
     /**
@@ -206,6 +215,12 @@ function normalizeSettings(raw) {
     5000,
     600000,
     d.stream_idle_timeout_ms
+  );
+  s.stream_keepalive_ms = clampInt(
+    s.stream_keepalive_ms,
+    0,
+    600000,
+    d.stream_keepalive_ms
   );
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
   s.timezone_offset_minutes = clampInt(
@@ -695,7 +710,13 @@ function anthropicToOpenAI(data, model) {
  *  usage 从 message_start / message_delta 事件中提取，拿不到则为 null；
  *  finish 取值 complete / client_abort / upstream_error / timeout。
  *  idleMs > 0 时启用静默超时。 */
-function anthropicStreamToOpenAI(upstreamBody, model, onFinish = () => {}, idleMs = 0) {
+function anthropicStreamToOpenAI(
+  upstreamBody,
+  model,
+  onFinish = () => {},
+  idleMs = 0,
+  keepaliveMs = 0
+) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const created = Math.floor(Date.now() / 1000);
@@ -708,11 +729,11 @@ function anthropicStreamToOpenAI(upstreamBody, model, onFinish = () => {}, idleM
   const toolIndexByBlock = {};
   let toolCounter = 0;
 
-  const settleUsage = (u, finish) => {
+  const settleUsage = (u, finish, meta) => {
     if (usageSettled) return;
     usageSettled = true;
     try {
-      onFinish(u, finish || 'complete');
+      onFinish(u, finish || 'complete', meta);
     } catch {
       // 忽略
     }
@@ -826,8 +847,9 @@ function anthropicStreamToOpenAI(upstreamBody, model, onFinish = () => {}, idleM
   // （正常路径由 flush 先结算 usage，settleUsage 自带幂等保护）
   upstreamBody.pipeTo(transform.writable).catch(() => {});
   return guardSSEStream(transform.readable, {
-    onFinish: (reason) => settleUsage(null, reason),
+    onFinish: (reason, meta) => settleUsage(null, reason, meta),
     idleMs,
+    keepaliveMs,
   });
 }
 
@@ -881,23 +903,36 @@ const isDoneBlock = (raw) => /^\s*data:\s*\[DONE\]\s*$/m.test(raw);
  * 这里把异常转换成一次可控收尾：补一个 error 事件 + data: [DONE] 再正常 close，
  * 客户端能拿到明确结束，而不是 TCP 层被掐断。
  *
- * 同时负责两件事：
+ * 同时负责四件事：
  *  - 静默超时（idleMs）：上游超过该时长一个字节都没下发，主动断开上游并收尾；
+ *  - 下游保活（keepaliveMs）：网关超过该时长没有向调用方下发任何字节时，
+ *    主动补一条 SSE 注释（`: ka\n\n`）。标准客户端会忽略注释行，但链路上的
+ *    nginx / CDN / 客户端读超时因此不会再遇到「零字节窗口」——
+ *    模型长思考、上游排队时不再被中途掐断。与 idleMs 互补：一个管上游→网关，一个管网关→调用方；
  *  - 结束原因回报（onFinish）：complete / client_abort / upstream_error / timeout，
- *    让「断流」第一次变得可观测。
+ *    让「断流」第一次变得可观测；
+ *  - 诊断信息（onFinish 第二个参数）：{ bytes, first_byte }——已向调用方转发的字节数、
+ *    是否收到过上游首块，用于区分「上游从没吐过字」和「吐到一半停了」。
  */
-function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
+function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
   const encoder = new TextEncoder();
   let reader = null;
   let idleTimer = null;
+  let kaTimer = null;
   let settled = false;
   let timedOut = false;
+  let closed = false;
+  let bytesOut = 0;
+  let gotFirst = false;
+  let controllerRef = null; // start() 里赋值，供保活定时器向下游写注释用
+
+  const meta = () => ({ bytes: bytesOut, first_byte: gotFirst });
 
   const settle = (reason) => {
     if (settled) return;
     settled = true;
     try {
-      onFinish(reason);
+      onFinish(reason, meta());
     } catch {
       // 忽略
     }
@@ -910,23 +945,55 @@ function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
     }
   };
 
-  const tail = (reason) => {
-    const message =
-      reason === 'timeout'
-        ? '上游超过静默超时未返回数据，网关已中断本次流式响应'
-        : '上游流式响应中途中断，网关已提前结束本次流式响应';
-    return (
-      'data: ' +
-      JSON.stringify({
-        error: { message, type: 'gateway_stream_error', code: reason },
-      }) +
-      '\n\n' +
-      'data: [DONE]\n\n'
-    );
+  const clearKa = () => {
+    if (kaTimer) {
+      clearInterval(kaTimer);
+      kaTimer = null;
+    }
+  };
+
+  const clearTimers = () => {
+    clearIdle();
+    clearKa();
+  };
+
+  /** 武装下游保活：每 keepaliveMs 检查一次，期间没有向调用方写过字节就补一条 SSE 注释 */
+  const armKa = () => {
+    if (!keepaliveMs || closed) return;
+    if (kaTimer) clearInterval(kaTimer);
+    kaTimer = setInterval(() => {
+      if (closed) {
+        clearKa();
+        return;
+      }
+      try {
+        controllerRef.enqueue(encoder.encode(': ka\n\n'));
+        bytesOut += 6;
+      } catch {
+        closed = true;
+        clearKa();
+      }
+    }, keepaliveMs);
+  };
+
+  /** 向调用方下发字节的统一入口：统计字节数，并在每次写入后重新武装下游保活 */
+  const out = (controller, bytes) => {
+    if (closed) return;
+    try {
+      controller.enqueue(bytes);
+      bytesOut += bytes.byteLength;
+    } catch {
+      closed = true;
+      clearKa();
+      return;
+    }
+    clearKa();
+    armKa();
   };
 
   return new ReadableStream({
     async start(controller) {
+      controllerRef = controller;
       reader = src.getReader();
       const arm = () => {
         if (!idleMs) return;
@@ -944,37 +1011,33 @@ function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
 
       try {
         arm();
+        armKa(); // 首块之前下游同样是零字节：长 prompt / 上游排队期间靠它保活
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
+          gotFirst = true;
           arm();
-          controller.enqueue(value);
+          out(controller, value);
         }
-        clearIdle();
+        clearTimers();
         if (timedOut) {
-          try {
-            controller.enqueue(encoder.encode(tail('timeout')));
-          } catch {
-            // 忽略
-          }
+          out(controller, encoder.encode(tail('timeout')));
           settle('timeout');
         } else {
           settle('complete');
         }
+        closed = true;
         try {
           controller.close();
         } catch {
           // 忽略
         }
       } catch (e) {
-        clearIdle();
+        clearTimers();
         if (!settled) {
-          try {
-            controller.enqueue(encoder.encode(tail('upstream_error')));
-          } catch {
-            // 忽略
-          }
+          out(controller, encoder.encode(tail('upstream_error')));
         }
+        closed = true;
         try {
           controller.close();
         } catch {
@@ -984,7 +1047,8 @@ function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
       }
     },
     cancel(reason) {
-      clearIdle();
+      clearTimers();
+      closed = true;
       settle('client_abort');
       try {
         if (reader) reader.cancel(reason);
@@ -1002,7 +1066,13 @@ function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
  * finish 取值：complete / client_abort / upstream_error / timeout。
  * idleMs > 0 时启用静默超时（上游超过该时长无任何字节即判定断流）。
  */
-function rewriteOpenAISSE(upstreamBody, model, onFinish = () => {}, idleMs = 0) {
+function rewriteOpenAISSE(
+  upstreamBody,
+  model,
+  onFinish = () => {},
+  idleMs = 0,
+  keepaliveMs = 0
+) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
@@ -1010,11 +1080,11 @@ function rewriteOpenAISSE(upstreamBody, model, onFinish = () => {}, idleMs = 0) 
   let settled = false;
   let sawDone = false;
 
-  const done = (finish) => {
+  const done = (finish, meta) => {
     if (settled) return;
     settled = true;
     try {
-      onFinish(usage, finish);
+      onFinish(usage, finish, meta);
     } catch {
       // 忽略
     }
@@ -1047,7 +1117,11 @@ function rewriteOpenAISSE(upstreamBody, model, onFinish = () => {}, idleMs = 0) 
 
   // 上游错误不再在这里吞掉：交给 guardSSEStream 统一收尾并上报结束原因
   upstreamBody.pipeTo(transform.writable).catch(() => {});
-  return guardSSEStream(transform.readable, { onFinish: done, idleMs });
+  return guardSSEStream(transform.readable, {
+    onFinish: done,
+    idleMs,
+    keepaliveMs,
+  });
 }
 
 /* ---------------- 上游转发 ---------------- */
@@ -1408,24 +1482,27 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
               resolveFinish = r;
             });
             // finish: complete / client_abort / upstream_error / timeout
-            const onFinish = (usage, finish) =>
-              resolveFinish({ usage, finish: finish || 'complete' });
+            // meta: { bytes, first_byte } — 已转发字节数 / 是否收到过上游首块（断流诊断用）
+            const onFinish = (usage, finish, meta) =>
+              resolveFinish({ usage, finish: finish || 'complete', meta });
             const streamBody = translated
               ? anthropicStreamToOpenAI(
                   upstream.body,
                   body.model,
                   onFinish,
-                  settings.stream_idle_timeout_ms
+                  settings.stream_idle_timeout_ms,
+                  settings.stream_keepalive_ms
                 )
               : rewriteOpenAISSE(
                   upstream.body,
                   body.model,
                   onFinish,
-                  settings.stream_idle_timeout_ms
+                  settings.stream_idle_timeout_ms,
+                  settings.stream_keepalive_ms
                 );
             ctx.waitUntil(
               finishPromise
-                .then(({ usage, finish }) =>
+                .then(({ usage, finish, meta }) =>
                   recordRequest(env, ctx, {
                     auth,
                     settings,
@@ -1436,6 +1513,8 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                     ok: finish === 'complete' || finish === 'client_abort',
                     stream: true,
                     finish,
+                    // 断流诊断：bytes=已向调用方转发的字节数，first_byte=是否收到过上游首块
+                    stream_meta: meta || null,
                     usage,
                     ms: Date.now() - started,
                     retries: attempt,

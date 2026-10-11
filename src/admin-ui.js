@@ -437,6 +437,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="grid">
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
             <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：上游超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
+            <label>下游保活间隔（毫秒）<input type="number" id="s_stream_ka" min="0" max="600000" step="1000"><span class="hint">网关超过该时长没向调用方下发任何字节时，主动补一条 SSE 注释（": ka"，客户端会忽略），防止模型长思考 / 上游排队期间的「零字节窗口」被中间的 nginx / CDN / 客户端读超时掐断。与「流式静默超时」互补：一个管上游→网关，一个管网关→调用方。0 = 关闭，默认 15000。</span></label>
             <label>瞬时错误重试次数（429 / 5xx / 网络异常）<input type="number" id="s_retries" min="0" max="5" step="1"></label>
           </div>
         </div>
@@ -1417,6 +1418,8 @@ function renderSettings(){
   $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
   $('s_timeout').value = s.request_timeout_ms || 60000;
   $('s_stream_idle').value = s.stream_idle_timeout_ms || 60000;
+  $('s_stream_ka').value =
+    s.stream_keepalive_ms === 0 ? 0 : s.stream_keepalive_ms || 15000;
   $('s_retries').value = s.retries == null ? 1 : s.retries;
   $('s_retention').value = s.log_retention_days || 30;
   $('s_tz').value = s.timezone_offset_minutes == null ? 480 : s.timezone_offset_minutes;
@@ -1454,6 +1457,10 @@ function collectSettings(){
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
     request_timeout_ms: parseInt($('s_timeout').value, 10) || 60000,
     stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 60000,
+    stream_keepalive_ms: (() => {
+      const v = parseInt($('s_stream_ka').value, 10);
+      return Number.isFinite(v) ? Math.max(0, v) : 15000;
+    })(),
     retries: parseInt($('s_retries').value, 10) || 0,
     log_retention_days: parseInt($('s_retention').value, 10) || 30,
     timezone_offset_minutes: tz,
