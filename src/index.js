@@ -1755,8 +1755,36 @@ async function loadStats(env, days, settings) {
     mergeBuckets(keys, s.keys);
   }
 
+  // 上一周期合计（概览环比用）：再往前取同样 n 天，只累加总量类指标。
+  // 多 n 次 R2 读对免费版额度无压力，换来仪表盘「较上一周期」的专业可读性。
+  let prev_totals = null;
+  if (n >= 2) {
+    const pt = {
+      requests: 0,
+      ok: 0,
+      failed: 0,
+      tokens: 0,
+      cost: 0,
+      streams: 0,
+      streams_aborted: 0,
+    };
+    for (let i = n; i < 2 * n; i++) {
+      const date = dateStr(base - i * 86400000, offset);
+      const s = (await r2GetJson(env, STATS_PREFIX + date + '.json', null)) || emptyDaily(date);
+      pt.requests += s.requests || 0;
+      pt.ok += s.ok || 0;
+      pt.failed += s.failed || 0;
+      pt.tokens += s.tokens || 0;
+      pt.cost = round8(pt.cost + (s.cost || 0));
+      pt.streams += s.streams || 0;
+      pt.streams_aborted += s.streams_aborted || 0;
+    }
+    prev_totals = pt;
+  }
+
   return {
     days: dayList,
+    prev_totals,
     totals: {
       requests: totals.requests,
       ok: totals.ok,

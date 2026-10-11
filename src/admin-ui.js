@@ -13,6 +13,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#070b14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234d7cff'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='36' height='36' rx='9' fill='url(%23g)'/%3E%3Cpath d='M11 21.5l4.6-5.4 3.4 3 5.9-7.1' stroke='%23fff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='25.5' cy='11' r='1.9' fill='%23fff'/%3E%3C/svg%3E">
 <title>OneAPI Gateway · 控制台</title>
 <style>
   :root{
@@ -261,6 +264,21 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .help ol,.help ul{padding-left:20px;margin:6px 0}
   .help li{margin:3px 0}
   .skeleton{height:14px;border-radius:6px;background:linear-gradient(90deg,var(--panel2),var(--hover),var(--panel2));background-size:200% 100%;animation:sk 1.2s infinite}
+
+  /* ---------- 专业细节：焦点环 / 粘性表头 / 环比徽章 / 动效偏好 ---------- */
+  :where(button,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
+  }
+  table{border-collapse:separate;border-spacing:0}
+  thead th{position:sticky;top:var(--headh);z-index:2;background:var(--panel);box-shadow:0 1px 0 var(--border2)}
+  .delta{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;margin-left:8px;vertical-align:2px;font-family:var(--mono)}
+  .delta.up{color:var(--ok);background:var(--ok-soft)}
+  .delta.down{color:var(--bad);background:var(--bad-soft)}
+  .delta.flat{color:var(--muted);background:var(--panel2);border:1px solid var(--border)}
+  .chart-wrap{position:relative}
+  .ctip{position:absolute;pointer-events:none;background:var(--elev);border:1px solid var(--border2);border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap;display:none;z-index:5}
+  .ctip b{font-family:var(--mono)}
   @keyframes sk{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
   @media (max-width:1024px){
@@ -590,9 +608,10 @@ function isExpired(k){ return !!(k.expires_at && Date.now() > Date.parse(k.expir
 function isExhausted(k){ return !!(k.quota_tokens > 0 && (k.used_tokens || 0) >= k.quota_tokens); }
 
 function toast(msg, type){
+  var icons = { ok: '✓', bad: '✕', info: 'ℹ' };
   var el = document.createElement('div');
   el.className = 'toast ' + (type || 'info');
-  el.textContent = msg;
+  el.innerHTML = '<span class="ticon">' + (icons[type] || icons.info) + '</span>' + esc(msg);
   $('toasts').appendChild(el);
   setTimeout(function(){ el.classList.add('out'); setTimeout(function(){ el.remove(); }, 320); }, 3600);
 }
@@ -809,6 +828,7 @@ function gotoTab(t){
   var meta = TITLES[t] || ['', ''];
   $('pageTitle').textContent = meta[0];
   $('pageDesc').textContent = meta[1];
+  document.title = meta[0] ? meta[0] + ' · OneAPI Gateway' : 'OneAPI Gateway · 控制台';
   if(t === 'logs'){ if(!$('logDate').value) $('logDate').value = S.serverToday || todayLocal(); loadLogs(true); }
   if(t === 'settings') renderSettings();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -847,7 +867,8 @@ function chartSvg(series, opts){
     });
     if(n <= 40){
       dots = series.map(function(p, i){
-        return '<circle class="dot" cx="' + X(i).toFixed(1) + '" cy="' + Y(p.value).toFixed(1) + '" r="3"><title>' + esc(p.label + ' · ' + fmt(p.value)) + '</title></circle>';
+        return '<circle class="dot" cx="' + X(i).toFixed(1) + '" cy="' + Y(p.value).toFixed(1) + '" r="3"><title>' + esc(p.label + ' · ' + fmt(p.value)) + '</title></circle>' +
+          '<circle class="hot" data-i="' + i + '" cx="' + X(i).toFixed(1) + '" cy="' + Y(p.value).toFixed(1) + '" r="11" fill="transparent" style="cursor:crosshair"/>';
       }).join('');
     }
   }
@@ -865,20 +886,36 @@ function chartSvg(series, opts){
 function statCard(o){
   return '<div class="stat"><div class="top"><span class="label">' + esc(o.label) + '</span>' +
     '<span class="ic ' + (o.tone || '') + '">' + (o.icon || '') + '</span></div>' +
-    '<div class="num">' + o.value + '</div><div class="sub">' + o.sub + '</div></div>';
+    '<div class="num">' + o.value + (o.delta || '') + '</div><div class="sub">' + o.sub + '</div></div>';
+}
+/* 环比徽章：当前周期 vs 上一周期同长度窗口，↑绿 ↓红 →灰；上一周期无数据则不显示 */
+function deltaBadge(curr, prev){
+  curr = Number(curr || 0); prev = Number(prev || 0);
+  if(!prev && !curr) return '';
+  var cls, arrow, txt;
+  if(!prev){ cls = 'up'; arrow = '↑'; txt = '新增'; }
+  else {
+    var pct = Math.round(((curr - prev) / prev) * 1000) / 10;
+    if(pct > 0){ cls = 'up'; arrow = '↑'; }
+    else if(pct < 0){ cls = 'down'; arrow = '↓'; }
+    else { cls = 'flat'; arrow = '→'; }
+    txt = Math.abs(pct) + '%';
+  }
+  return '<span class="delta ' + cls + '" title="较上一周期（往前同样天数）">' + arrow + txt + '</span>';
 }
 function renderStats(){
   var t = (S.stats && S.stats.totals) || { requests:0, ok:0, failed:0, tokens:0, cost:0, avg_ms:0, success_rate:0 };
+  var pv = (S.stats && S.stats.prev_totals) || null;
   var enCh = S.channels.filter(function(c){ return c.enabled; }).length;
   var enKey = S.keys.filter(function(k){ return k.enabled !== false && !isExpired(k); }).length;
   var rate = t.success_rate || 0;
   var tone = rate >= 99 ? 'ok' : (rate >= 90 ? 'warn' : 'bad');
   var html = '';
   var aborted = t.streams_aborted || 0;
-  html += statCard({ label:'请求总数', value: fmtNum(t.requests), sub:'近 ' + RANGE + ' 天 · 流式 ' + fmtNum(t.streams) + (aborted ? ' · 异常结束 ' + fmtNum(aborted) : ''), icon: I.list });
+  html += statCard({ label:'请求总数', value: fmtNum(t.requests), delta: deltaBadge(t.requests, pv && pv.requests), sub:'近 ' + RANGE + ' 天 · 流式 ' + fmtNum(t.streams) + (aborted ? ' · 异常结束 ' + fmtNum(aborted) : ''), icon: I.list });
   html += statCard({ label:'成功率', value: rate + '%', sub:'成功 ' + fmtNum(t.ok) + ' · 失败 ' + fmtNum(t.failed), icon: I.check, tone: t.requests ? tone : '' });
-  html += statCard({ label:'Tokens', value: fmtNum(t.tokens), sub:'输入 + 输出合计', icon: I.bolt });
-  html += statCard({ label:'预估费用', value: '$' + fmtCost(t.cost), sub:'按定价表估算（USD）', icon: I.coin });
+  html += statCard({ label:'Tokens', value: fmtNum(t.tokens), delta: deltaBadge(t.tokens, pv && pv.tokens), sub:'输入 + 输出合计', icon: I.bolt });
+  html += statCard({ label:'预估费用', value: '$' + fmtCost(t.cost), delta: deltaBadge(t.cost, pv && pv.cost), sub:'按定价表估算（USD）', icon: I.coin });
   html += statCard({ label:'平均延迟', value: fmtMs(t.avg_ms), sub:'含上游排队与生成', icon: I.clock });
   html += statCard({ label:'启用资源', value: enCh + ' / ' + enKey, sub:'渠道 / 有效密钥', icon: I.server });
   $('statCards').innerHTML = html;
@@ -894,6 +931,37 @@ function renderTrend(){
   $('trendChart').innerHTML = pts.length
     ? chartSvg(pts, { fmt: fmt })
     : '<div class="empty">' + I.inbox + '<div>暂无统计数据，发起一次请求后即可看到趋势</div></div>';
+  bindChartTip();
+}
+/* 趋势图悬浮提示：鼠标悬停数据点热区时，浮层显示完整日期与该日数值 */
+function bindChartTip(){
+  var wrap = $('trendChart');
+  var svg = wrap ? wrap.querySelector('svg.chart') : null;
+  if(!svg) return;
+  var old = wrap.querySelector('.ctip'); if(old) old.remove();
+  var tip = document.createElement('div');
+  tip.className = 'ctip';
+  wrap.appendChild(tip);
+  svg.addEventListener('mousemove', function(e){
+    var hot = e.target && e.target.classList && e.target.classList.contains('hot') ? e.target : null;
+    if(!hot){ tip.style.display = 'none'; return; }
+    var i = parseInt(hot.getAttribute('data-i'), 10);
+    var days = (S.stats && S.stats.days) || [];
+    var p = days[i] || null;
+    if(!p){ tip.style.display = 'none'; return; }
+    var v = Number(p[METRIC] || 0);
+    var txt = METRIC === 'cost' ? '$' + fmtCost(v) : (METRIC === 'tokens' ? fmtNum(v) + ' Tokens' : fmtNum(v) + ' 次请求');
+    tip.innerHTML = esc(p.date) + '<br><b>' + txt + '</b>';
+    var wr = wrap.getBoundingClientRect();
+    var vb = svg.viewBox && svg.viewBox.baseVal;
+    if(!vb){ tip.style.display = 'none'; return; }
+    var x = (parseFloat(hot.getAttribute('cx')) / vb.width) * wr.width;
+    var y = (parseFloat(hot.getAttribute('cy')) / vb.height) * wr.height;
+    tip.style.display = 'block';
+    tip.style.left = Math.min(Math.max(0, wr.width - 140), Math.max(0, x + 12)) + 'px';
+    tip.style.top = Math.max(0, y - 48) + 'px';
+  });
+  svg.addEventListener('mouseleave', function(){ tip.style.display = 'none'; });
 }
 function renderOverview(){
   var html = '';
