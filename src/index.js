@@ -62,9 +62,26 @@ const err = (message, status = 400, code = 'error') =>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
-const todayStr = () => new Date().toISOString().slice(0, 10);
 const rand = (n = 8) => Math.random().toString(36).slice(2, 2 + n);
 const reqId = () => 'req_' + Date.now().toString(36) + rand(6);
+
+/**
+ * 按配置的时区偏移计算「当地日期」（YYYY-MM-DD）。
+ *
+ * Worker 运行在 UTC，若直接用 toISOString() 取日期，会与控制台（浏览器本地时区）
+ * 相差一天：例如北京时间凌晨 2 点写入的日志会被归到「UTC 前一天」，
+ * 而控制台默认查询当天 → 查询结果为空。因此统一用可配置的时区偏移换算。
+ */
+function dateStr(ts, offsetMinutes) {
+  const t = (ts == null ? Date.now() : ts) + (Number(offsetMinutes) || 0) * 60000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/** 同上，取「当地小时」（0-23），用于统计里的小时分布 */
+function hourStr(ts, offsetMinutes) {
+  const t = (ts == null ? Date.now() : ts) + (Number(offsetMinutes) || 0) * 60000;
+  return String(new Date(t).getUTCHours());
+}
 
 function clampInt(v, min, max, dflt) {
   const n = parseInt(v, 10);
@@ -123,6 +140,12 @@ function defaultSettings() {
     retries: 1,
     /** 请求日志保留天数（供「清理日志」使用） */
     log_retention_days: 30,
+    /**
+     * 统计与日志使用的时区偏移（分钟）。默认 480 = UTC+8（北京时间）。
+     * Worker 运行在 UTC，若为 0，则北京时间凌晨写入的日志会被归到前一天，
+     * 导致控制台按「今天」查询时为空。
+     */
+    timezone_offset_minutes: 480,
     /** 额外对外暴露的模型名（不影响路由，仅用于 /v1/models 展示） */
     custom_models: [],
     /** 默认定价（美元 / 每 100 万 Tokens） */
@@ -139,6 +162,12 @@ function normalizeSettings(raw) {
   s.request_timeout_ms = clampInt(s.request_timeout_ms, 1000, 600000, d.request_timeout_ms);
   s.retries = clampInt(s.retries, 0, 5, d.retries);
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
+  s.timezone_offset_minutes = clampInt(
+    s.timezone_offset_minutes,
+    -720,
+    840,
+    d.timezone_offset_minutes
+  );
   s.custom_models = Array.isArray(s.custom_models)
     ? s.custom_models.map((m) => String(m).trim()).filter(Boolean)
     : [];
@@ -838,9 +867,9 @@ async function forwardOnce(channel, apiKey, path, payload, settings) {
 /* ---------------- 日志 / 统计 / 用量 ---------------- */
 
 /** 记录请求日志到 R2。key 使用「倒序时间戳」，使 R2 列表天然按时间从新到旧返回 */
-async function logUsage(env, entry) {
+async function logUsage(env, entry, settings) {
   try {
-    const day = todayStr();
+    const day = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     const inverted = String(LOG_TS_MAX - Date.now()).padStart(13, '0');
     const key = `${LOG_PREFIX}${day}/${inverted}-${rand(6)}.json`;
     const { auth, ...rest } = entry;
@@ -887,9 +916,9 @@ function bumpBucket(map, name, entry) {
 }
 
 /** 按天聚合统计（尽力而为：并发写可能轻微丢失计数，用于仪表盘展示足够） */
-async function bumpStats(env, entry) {
+async function bumpStats(env, entry, settings) {
   try {
-    const date = todayStr();
+    const date = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     const key = STATS_PREFIX + date + '.json';
     const s = (await r2GetJson(env, key, null)) || emptyDaily(date);
     s.requests = (s.requests || 0) + 1;
@@ -907,7 +936,7 @@ async function bumpStats(env, entry) {
     bumpBucket(s.models, entry.model, entry);
     bumpBucket(s.channels, entry.channel, entry);
     bumpBucket(s.keys, entry.key_name, entry);
-    const hour = String(new Date().getHours());
+    const hour = hourStr(Date.now(), settings && settings.timezone_offset_minutes);
     s.hours[hour] = (s.hours[hour] || 0) + 1;
     await r2PutJson(env, key, s);
   } catch {
@@ -952,7 +981,7 @@ function recordRequest(env, ctx, o) {
         retries: o.retries || 0,
         usage_missing: !!o.stream && !o.usage,
         error: o.error,
-      });
+      }, o.settings);
       await bumpStats(env, {
         model: o.model,
         channel: o.channel,
@@ -962,7 +991,7 @@ function recordRequest(env, ctx, o) {
         tokens,
         cost,
         ms: o.ms,
-      });
+      }, o.settings);
       if (o.ok) await bumpKeyUsage(env, o.auth, tokens, cost);
     })().catch(() => {})
   );
@@ -1224,12 +1253,13 @@ function toSortedList(map, limit) {
 }
 
 /** 聚合最近 N 天的统计 */
-async function loadStats(env, days) {
+async function loadStats(env, days, settings) {
   const n = clampInt(days, 1, 90, 14);
+  const offset = settings && settings.timezone_offset_minutes;
   const dates = [];
   const base = Date.now();
   for (let i = n - 1; i >= 0; i--) {
-    dates.push(new Date(base - i * 86400000).toISOString().slice(0, 10));
+    dates.push(dateStr(base - i * 86400000, offset));
   }
   const totals = {
     requests: 0,
@@ -1442,15 +1472,19 @@ async function handleAdmin(env, ctx, request) {
   /* ---- 统计 ---- */
   if (path === '/api/admin/stats' && request.method === 'GET') {
     const days = url.searchParams.get('days') || 14;
-    return json(await loadStats(env, days));
+    return json(await loadStats(env, days, settings));
   }
 
   /* ---- 日志 ---- */
   if (path === '/api/admin/logs/dates' && request.method === 'GET') {
-    return json({ dates: await listLogDates(env, 60), today: todayStr() });
+    return json({
+      dates: await listLogDates(env, 60),
+      today: dateStr(Date.now(), settings.timezone_offset_minutes),
+    });
   }
   if (path === '/api/admin/logs/summary' && request.method === 'GET') {
-    const date = url.searchParams.get('date') || todayStr();
+    const date =
+      url.searchParams.get('date') || dateStr(Date.now(), settings.timezone_offset_minutes);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return err('日期格式应为 YYYY-MM-DD', 400, 'bad_date');
     const out = await listLogs(env, date, {
       limit: url.searchParams.get('limit') || 50,
@@ -1477,7 +1511,7 @@ async function handleAdmin(env, ctx, request) {
       3650,
       settings.log_retention_days
     );
-    const cutoff = new Date(Date.now() - keep * 86400000).toISOString().slice(0, 10);
+    const cutoff = dateStr(Date.now() - keep * 86400000, settings.timezone_offset_minutes);
     const dates = await listLogDates(env, 0);
     const victims = dates.filter((d) => d < cutoff);
     let removed = 0;
@@ -1486,6 +1520,24 @@ async function handleAdmin(env, ctx, request) {
       await env.R2.delete(STATS_PREFIX + d + '.json').catch(() => {});
     }
     return json({ ok: true, keep_days: keep, cutoff, removed_dates: victims.length, removed_logs: removed });
+  }
+  // 清空日志：scope=day 清空指定日期（默认今天），scope=all 清空全部日志与统计
+  if (path === '/api/admin/logs/clear' && request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const scope = body && body.scope === 'all' ? 'all' : 'day';
+    if (scope === 'all') {
+      const removedLogs = await deletePrefix(env, LOG_PREFIX);
+      const removedStats = await deletePrefix(env, STATS_PREFIX);
+      return json({ ok: true, scope: 'all', removed_logs: removedLogs, removed_stats: removedStats });
+    }
+    const date =
+      (body && body.date) || dateStr(Date.now(), settings.timezone_offset_minutes);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return err('日期格式应为 YYYY-MM-DD', 400, 'bad_date');
+    }
+    const removed = await deletePrefix(env, `${LOG_PREFIX}${date}/`);
+    await env.R2.delete(STATS_PREFIX + date + '.json').catch(() => {});
+    return json({ ok: true, scope: 'day', date, removed_logs: removed });
   }
 
   /* ---- 测试 ---- */

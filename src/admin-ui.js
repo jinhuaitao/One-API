@@ -403,6 +403,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <div class="spacer"></div>
             <label class="check" style="font-size:12.5px"><input type="checkbox" id="logAuto"> 自动刷新</label>
             <button class="ghost sm" data-act="export-logs">导出 CSV</button>
+            <button class="soft sm" data-act="clear-day-logs">清空当日</button>
             <button class="sm" data-act="load-logs">查询</button>
           </div>
           <div id="logTable"></div>
@@ -424,11 +425,15 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
         <div class="card">
           <div class="card-head">
-            <div><h3>日志与统计</h3><p class="desc">超过保留期的日志可一键清理（同时清理对应统计）</p></div>
-            <button class="ghost sm" data-act="cleanup-logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>清理过期日志</button>
+            <div><h3>日志与统计</h3><p class="desc">统计与日志按「当地日期」归档；超过保留期的日志可一键清理</p></div>
+            <div style="display:flex;gap:8px">
+              <button class="ghost sm" data-act="cleanup-logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>清理过期日志</button>
+              <button class="soft sm" data-act="clear-all-logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/><path d="M10 11l4 4M14 11l-4 4"/></svg>清空全部日志</button>
+            </div>
           </div>
           <div class="grid">
             <label>日志保留天数<input type="number" id="s_retention" min="1" max="3650" step="1"></label>
+            <label>时区偏移（分钟，480 = UTC+8）<input type="number" id="s_tz" min="-720" max="840" step="30"><span class="hint">决定日志与统计按哪个「当地日期」归档；若控制台查不到刚产生的日志，多半是这里与本地时区不一致。</span></label>
             <label>额外对外暴露的模型（逗号分隔，仅用于 /v1/models 展示）<input type="text" id="s_models" placeholder="my-alias,gpt-4o"></label>
           </div>
         </div>
@@ -495,7 +500,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
 <script>
 var AK = '';
-var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '' };
+var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
 var editingCh = -1, editingKey = -1;
 var RANGE = 14, METRIC = 'requests';
 var autoTimer = null;
@@ -622,9 +627,10 @@ function setConn(state){
 }
 function doLogout(){
   store.del('og_admin_key');
-  AK = ''; S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '' };
+  AK = '';   S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
   if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
   var akInput = $('ak'); if(akInput) akInput.value = '';
+  var di = $('logDate'); if(di) di.value = '';
   setConn('off');
   $('login').classList.add('on');
   renderAll();
@@ -636,12 +642,20 @@ function loadAll(){
     api('/api/admin/channels'),
     api('/api/admin/keys'),
     api('/api/admin/settings'),
-    api('/api/admin/stats?days=' + RANGE)
+    api('/api/admin/stats?days=' + RANGE),
+    api('/api/admin/logs/dates')
   ]).then(function(res){
     S.channels = res[0] || [];
     S.keys = res[1] || [];
     S.settings = res[2] || {};
     S.stats = res[3] || null;
+    // 用服务端（按设置里的时区偏移）算出的「今天」作为默认查询日期，
+    // 避免浏览器时区与 Worker 的 UTC 时区不一致导致查不到刚产生的日志
+    S.serverToday = (res[4] && res[4].today) || todayLocal();
+    S.logDates = (res[4] && res[4].dates) || [];
+    var di = $('logDate');
+    if(di && !di.value) di.value = S.serverToday;
+    S.logDate = di ? di.value : S.serverToday;
     renderAll();
   });
 }
@@ -675,7 +689,7 @@ function gotoTab(t){
   var meta = TITLES[t] || ['', ''];
   $('pageTitle').textContent = meta[0];
   $('pageDesc').textContent = meta[1];
-  if(t === 'logs'){ if(!S.logDate) $('logDate').value = todayLocal(); loadLogs(true); }
+  if(t === 'logs'){ if(!$('logDate').value) $('logDate').value = S.serverToday || todayLocal(); loadLogs(true); }
   if(t === 'settings') renderSettings();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1177,7 +1191,7 @@ function importConfig(file){
 
 /* ---------- 日志 ---------- */
 function loadLogs(silent){
-  var d = $('logDate').value || todayLocal();
+  var d = $('logDate').value || S.serverToday || todayLocal();
   S.logDate = d;
   LOGF = {
     ok: $('logOk').value,
@@ -1198,7 +1212,7 @@ var LOGF = { ok:'', stream:'', model:'', q:'' };
 function renderLogs(){
   var h = '<table><thead><tr><th style="width:150px">时间</th><th>调用方</th><th>模型</th><th>渠道</th><th style="width:88px">结果</th><th style="width:92px">Tokens</th><th style="width:80px">耗时</th><th style="width:70px">操作</th></tr></thead><tbody>';
   if(!S.logs.length){
-    h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + esc(S.logDate || '') + ' 暂无符合条件的请求日志</div></div></td></tr>';
+    h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + esc(S.logDate || '') + ' 暂无符合条件的请求日志</div><div id="logEmptyHint" style="margin-top:12px"></div></div></td></tr>';
   }
   S.logs.forEach(function(l, i){
     h += '<tr><td class="mono">' + esc(fmtTime(l.ts)) + '</td>' +
@@ -1212,6 +1226,25 @@ function renderLogs(){
   });
   $('logTable').innerHTML = h + '</tbody></table>';
   $('logPager').innerHTML = S.logCursor ? '<button class="ghost sm" data-act="log-more">加载更早的日志</button>' : (S.logs.length ? '<span class="muted" style="font-size:12px">已到当日日志末尾</span>' : '');
+  if(!S.logs.length) fillLogDatesHint();
+}
+/** 查不到日志时，列出实际有日志的日期，便于快速定位（例如时区/日期选错） */
+function fillLogDatesHint(){
+  var box = $('logEmptyHint'); if(!box) return;
+  box.innerHTML = '<span class="muted">正在检查其他日期…</span>';
+  api('/api/admin/logs/dates').then(function(r){
+    S.logDates = r.dates || [];
+    S.serverToday = r.today || S.serverToday;
+    var others = S.logDates.filter(function(d){ return d !== S.logDate; });
+    if(!others.length){
+      box.innerHTML = '<span class="muted">所有日期都没有日志记录。若刚发起过请求，请确认调用的是 /v1/* 接口且鉴权通过。</span>';
+      return;
+    }
+    box.innerHTML = '<span class="muted">以下日期有日志，点击切换：</span><div style="margin-top:8px">' +
+      others.slice(0, 10).map(function(d){
+        return '<button class="ghost sm" data-act="log-goto" data-d="' + esc(d) + '">' + esc(d) + (d === S.serverToday ? '（今天）' : '') + '</button>';
+      }).join(' ') + '</div>';
+  }).catch(function(){ box.innerHTML = ''; });
 }
 function loadMoreLogs(btn){
   if(!S.logCursor) return;
@@ -1256,6 +1289,7 @@ function renderSettings(){
   $('s_timeout').value = s.request_timeout_ms || 60000;
   $('s_retries').value = s.retries == null ? 1 : s.retries;
   $('s_retention').value = s.log_retention_days || 30;
+  $('s_tz').value = s.timezone_offset_minutes == null ? 480 : s.timezone_offset_minutes;
   $('s_models').value = (s.custom_models || []).join(',');
   var dp = s.default_pricing || { in:0, out:0 };
   $('s_pin').value = dp.in || 0;
@@ -1284,11 +1318,14 @@ function collectSettings(){
     if(!name) return;
     pricing[name] = { in: Number(row.querySelector('.p_in').value) || 0, out: Number(row.querySelector('.p_out').value) || 0 };
   });
+  var tz = parseInt($('s_tz').value, 10);
+  if(!Number.isFinite(tz)) tz = 480;
   return {
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
     request_timeout_ms: parseInt($('s_timeout').value, 10) || 60000,
     retries: parseInt($('s_retries').value, 10) || 0,
     log_retention_days: parseInt($('s_retention').value, 10) || 30,
+    timezone_offset_minutes: tz,
     custom_models: $('s_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
     default_pricing: { in: Number($('s_pin').value) || 0, out: Number($('s_pout').value) || 0 },
     pricing: pricing
@@ -1393,11 +1430,38 @@ document.addEventListener('click', function(e){
     copyText(el.getAttribute('data-t'));
   }
   else if(act === 'curl-key') showCurl(i);
-  else if(act === 'log-prev'){ $('logDate').value = shiftDate($('logDate').value || todayLocal(), -1); loadLogs(); }
-  else if(act === 'log-next'){ $('logDate').value = shiftDate($('logDate').value || todayLocal(), 1); loadLogs(); }
-  else if(act === 'log-today'){ $('logDate').value = todayLocal(); loadLogs(); }
+  else if(act === 'log-prev'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), -1); loadLogs(); }
+  else if(act === 'log-next'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), 1); loadLogs(); }
+  else if(act === 'log-today'){ $('logDate').value = S.serverToday || todayLocal(); loadLogs(); }
+  else if(act === 'log-goto'){ $('logDate').value = el.getAttribute('data-d'); loadLogs(); }
   else if(act === 'load-logs') loadLogs();
   else if(act === 'log-more') loadMoreLogs(el);
+  else if(act === 'clear-day-logs'){
+    var day = $('logDate').value || S.serverToday || todayLocal();
+    confirmDlg('清空当日日志', '将删除 ' + day + ' 的全部请求日志与当日统计，此操作不可恢复，确定继续？').then(function(ok){
+      if(!ok) return;
+      el.disabled = true;
+      api('/api/admin/logs/clear', 'POST', { scope: 'day', date: day }).then(function(r){
+        toast('已清空 ' + r.date + ' 的 ' + r.removed_logs + ' 条日志', 'ok');
+        return Promise.all([loadAll(), api('/api/admin/logs/dates').then(function(x){ S.logDates = x.dates || []; })]);
+      }).then(function(){ loadLogs(true); })
+        .catch(function(er){ toast(er.message, 'bad'); })
+        .then(function(){ el.disabled = false; });
+    });
+  }
+  else if(act === 'clear-all-logs'){
+    confirmDlg('清空全部日志', '将删除所有日期的请求日志与统计文件，此操作不可恢复，确定继续？').then(function(ok){
+      if(!ok) return;
+      el.disabled = true;
+      api('/api/admin/logs/clear', 'POST', { scope: 'all' }).then(function(r){
+        toast('已清空 ' + r.removed_logs + ' 条日志', 'ok');
+        S.logs = []; S.logCursor = null;
+        return Promise.all([loadAll(), api('/api/admin/logs/dates').then(function(x){ S.logDates = x.dates || []; })]);
+      }).then(function(){ loadLogs(true); })
+        .catch(function(er){ toast(er.message, 'bad'); })
+        .then(function(){ el.disabled = false; });
+    });
+  }
   else if(act === 'view-log') viewLog(i);
   else if(act === 'export-logs') exportLogs();
   else if(act === 'save-settings') saveSettings(el);
@@ -1463,8 +1527,9 @@ document.addEventListener('input', function(e){
 (function init(){
   initTheme();
   $('ak').value = AK;
-  $('logDate').value = todayLocal();
-  S.logDate = todayLocal();
+  // 日志日期不在这里写死：连接成功后由 loadAll() 用服务端（按设置的时区偏移）
+  // 算出的「今天」填充，避免浏览器时区与 Worker 的 UTC 时区不一致
+  $('logDate').value = '';
   $('btnTheme').addEventListener('click', function(){
     applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
     if(S.stats) renderTrend();

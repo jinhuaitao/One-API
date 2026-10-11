@@ -172,6 +172,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 | `GET /api/admin/logs/summary?date=&limit=&cursor=&ok=&stream=&model=&q=` | 日志分页查询（支持筛选） |
 | `GET /api/admin/log?key=` | 单条日志完整内容 |
 | `POST /api/admin/logs/cleanup` | 清理超过保留期的日志与统计 |
+| `POST /api/admin/logs/clear` | 清空日志：`{scope:"day", date:"YYYY-MM-DD"}` 清空某天，`{scope:"all"}` 清空全部 |
 | `POST /api/admin/test-channel` | 测试单个渠道（逐个 Key） |
 | `POST /api/admin/test-all` | 批量测试所有已启用渠道 |
 | `POST /api/admin/test-route` | 按模型查看路由候选顺序并实际调用一次 |
@@ -188,6 +189,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 | `request_timeout_ms` | `60000` | 上游请求超时（首字节），1000 ~ 600000 |
 | `retries` | `1` | 瞬时错误（429/5xx/网络异常）在同一 Key 上的额外重试次数，0 ~ 5 |
 | `log_retention_days` | `30` | 日志保留天数，供「清理过期日志」使用 |
+| `timezone_offset_minutes` | `480` | 统计与日志按哪个「当地日期」归档。480 = UTC+8。**若控制台查不到刚产生的日志，多半是这里与本地时区不一致** |
 | `custom_models` | `[]` | 额外对外暴露的模型名（仅影响 `/v1/models` 展示，不参与路由） |
 | `default_pricing` | `{in:0,out:0}` | 默认定价（美元 / 每 100 万 Tokens） |
 | `pricing` | `{}` | 按模型定价，用于估算费用，不影响转发 |

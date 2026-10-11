@@ -43,6 +43,7 @@ const settings = {
   request_timeout_ms: 60000,
   retries: 1,
   log_retention_days: 30,
+  timezone_offset_minutes: 480,
   custom_models: ['my-alias'],
   default_pricing: { in: 0.15, out: 0.6 },
   pricing: {
@@ -148,6 +149,7 @@ const injected = `<script>
       body = { days: cut, totals: tot, models: M.stats.models, channels: M.stats.channels, keys: M.stats.keys };
     }
     else if (u.indexOf('/api/admin/logs/dates') === 0) body = { dates: M.dates, today: M.dates[0] };
+    else if (u.indexOf('/api/admin/logs/clear') === 0) body = { ok: true, scope: 'day', date: M.dates[0], removed_logs: M.logs.length };
     else if (u.indexOf('/api/admin/logs/summary') === 0) body = { date: M.dates[0], logs: M.logs, cursor: null, scanned: M.logs.length };
     else if (u.indexOf('/api/admin/log') === 0) body = M.logs[0];
     else if (u.indexOf('/api/admin/test-channel') === 0) body = {
