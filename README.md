@@ -36,6 +36,10 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
   而是补一个 error 事件 + `data: [DONE]` 后正常收尾，调用方能拿到明确的结束
 - **静默超时**：流式响应单独有「读超时」（`stream_idle_timeout_ms`，默认 60s）。
   `request_timeout_ms` 只作用于首字节，管不了流中途卡死；超过静默超时网关会主动断开上游并收尾
+- **下游保活**：网关超过 `stream_keepalive_ms`（默认 15s）没向调用方下发任何字节时，
+  主动补一条 SSE 注释（`: ka`，标准客户端会忽略）。与静默超时互补：一个管「上游→网关」，
+  一个管「网关→调用方」——模型长思考、上游排队期间的「零字节窗口」不再被中间的
+  nginx / CDN / 客户端读超时掐断，OpenAI 兼容渠道同样生效
 - **补发 `[DONE]`**：部分兼容上游不发送结束标记，由网关补上，避免调用方一直等不到流结束
 - **ping 保活**：Anthropic 渠道的 `event: ping` 心跳会转发为 SSE 注释，
   避免模型长时间思考时链路零字节被中间的 nginx / CDN / 客户端读超时掐断
@@ -207,6 +211,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 | `allow_admin_key_as_api_key` | `true` | 是否允许用 `ADMIN_KEY` 直接调用 `/v1/*`（生产建议关闭） |
 | `request_timeout_ms` | `60000` | 上游请求超时（首字节），1000 ~ 600000 |
 | `stream_idle_timeout_ms` | `60000` | 流式响应的静默超时：上游超过该时长一个字节都没下发即判定断流，网关主动断开并收尾，5000 ~ 600000 |
+| `stream_keepalive_ms` | `15000` | 下游保活间隔：网关超过该时长没向调用方下发任何字节时，主动补一条 SSE 注释（`: ka`）保住链路，防止零字节窗口被中间层 / 客户端读超时掐断。与静默超时互补（一个管上游→网关，一个管网关→调用方），0 = 关闭，0 ~ 600000 |
 | `retries` | `1` | 瞬时错误（429/5xx/网络异常）在同一 Key 上的额外重试次数，0 ~ 5 |
 | `log_retention_days` | `30` | 日志保留天数，供「清理过期日志」使用 |
 | `timezone_offset_minutes` | `480` | 统计与日志按哪个「当地日期」归档。480 = UTC+8。**若控制台查不到刚产生的日志，多半是这里与本地时区不一致** |
@@ -244,8 +249,14 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
      `exceeded CPU time limit`（错误码 `1102`）。免费版只有 10ms CPU，
      流式长回答容易越线；升级到付费版，或调大 `stream_idle_timeout_ms` 无关，
      需要减少每块的处理开销（本项目已做字符串快路径优化）。
-  4. **长时间零字节然后被掐断**：调小「流式静默超时」让网关更早介入；
-     同时确认 Anthropic 渠道的 ping 心跳能正常转发（网关已转发为 SSE 注释）。
+  4. **长时间零字节然后被掐断**：v2.0.1 起网关自带「下游保活」（`stream_keepalive_ms`，默认 15s）：
+     网关超过该时长没向调用方下发任何字节时，会主动补一条 SSE 注释（`: ka`），
+     OpenAI 兼容渠道与 Anthropic 渠道均生效，nginx / CDN / 客户端读超时不再遇到零字节窗口。
+     若上游真断了，静默超时（`stream_idle_timeout_ms`）会让网关更早介入收尾；
+     Anthropic 渠道的 ping 心跳也已转发为 SSE 注释。
+  5. **日志里看 `stream_meta` 字段**辅助定位：`bytes` 是本次流已向调用方转发的字节数，
+     `first_byte` 表示是否收到过上游首块——`first_byte: false` 说明上游从没吐过字
+     （多为上游排队 / 超长 prompt 预处理），`bytes` 很小说明吐了没多久就停了。
 - **为什么 `request_timeout_ms` 调大了流还是会卡死**：这个超时只作用于「首字节」
   （响应头到达即失效），流中途卡死由独立的 `stream_idle_timeout_ms` 负责。
   两者都需要配置。
