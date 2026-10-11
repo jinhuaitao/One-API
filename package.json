@@ -11,6 +11,7 @@
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
     "test": "node test/smoke.mjs",
+    "test:stream": "node test/stream-sse.mjs",
     "preview": "node preview/build.mjs"
   },
   "type": "module",

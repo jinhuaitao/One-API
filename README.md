@@ -31,6 +31,19 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
 - **附加请求头**：可为渠道配置额外 Header 一并发送给上游
 - **连通性巡检**：单渠道测试（逐个 Key 展示结果）、全部渠道批量测试，结果写入渠道健康状态
 
+### 流式（SSE）健壮性
+- **收尾守卫**：上游中途断开时，网关不会让调用方看到「连接被重置」，
+  而是补一个 error 事件 + `data: [DONE]` 后正常收尾，调用方能拿到明确的结束
+- **静默超时**：流式响应单独有「读超时」（`stream_idle_timeout_ms`，默认 60s）。
+  `request_timeout_ms` 只作用于首字节，管不了流中途卡死；超过静默超时网关会主动断开上游并收尾
+- **补发 `[DONE]`**：部分兼容上游不发送结束标记，由网关补上，避免调用方一直等不到流结束
+- **ping 保活**：Anthropic 渠道的 `event: ping` 心跳会转发为 SSE 注释，
+  避免模型长时间思考时链路零字节被中间的 nginx / CDN / 客户端读超时掐断
+- **结束原因可观测**：日志记录 `finish` = `complete` / `client_abort` / `upstream_error` / `timeout`，
+  日志页可按「仅异常结束」筛选，用来定位断流
+- **CPU 友好**：SSE 逐块改写走字符串快路径，只对含 `model` / `usage` 的块做 JSON 解析，
+  避免长回答累积 CPU 时间触发 Workers 的 CPU 时限（免费版 10ms）
+
 ### 密钥
 - 多 Key 发放、启用/禁用、Token 配额限制、**有效期**、**允许调用的模型白名单**、备注
 - 用量自动累加：Tokens、请求数、**预估费用**、最近使用时间
@@ -46,8 +59,9 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
 
 ### 数据（全部在 R2）
 - `data/channels.json` 渠道 · `data/keys.json` 密钥 · `data/settings.json` 设置
-- `data/stats/<日期>.json` 按天聚合统计（请求 / Tokens / 费用 / 分模型分渠道分密钥）
-- `logs/<日期>/<倒序时间戳>.json` 请求日志（key 倒序，列表天然按时间从新到旧）
+- `data/stats/<日期>.json` 按天聚合统计（请求 / Tokens / 费用 / 流式 / 流式异常结束 / 分模型分渠道分密钥）
+- `logs/<日期>/<倒序时间戳>.json` 请求日志（key 倒序，列表天然按时间从新到旧）；
+  流式请求额外记录 `finish`（`complete` / `client_abort` / `upstream_error` / `timeout`）
 
 ## 自动创建 R2 的原理
 
@@ -144,12 +158,16 @@ npm run deploy   # 先 ensure-r2 再 wrangler deploy
 
 ```bash
 npm test         # 冒烟测试：内存版 R2 + 模拟上游，覆盖 53 项断言，无需任何依赖
+npm run test:stream   # 流式（SSE）回归测试：9 组场景 / 30 项断言，无需任何依赖
 npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制台静态预览）
 ```
 
 - `npm test` 会端到端跑通鉴权、模型路由、OpenAI/Anthropic 转发、流式 SSE、
   故障转移与重试、密钥限制（配额/过期/停用/模型白名单）、统计与日志、
   渠道测试、设置校验、日志清理等链路。
+- `npm run test:stream` 直接导入真实的 `src/index.js`，用受控的网络分片与上游故障
+  验证流式链路：分片切断、CRLF 跨分片、上游中途报错、客户端断开、静默超时、
+  补发 `[DONE]`、Anthropic 翻译与 ping 保活等。改动流式相关代码后请务必跑一遍。
 - `npm run preview` 生成的是**纯静态预览页**，数据全部本地模拟，
   不会连接真实网关，也不会写入任何地方；用浏览器直接打开即可查看完整界面。
 
@@ -170,7 +188,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 | `GET/POST /api/admin/settings` | 网关设置查询 / 保存 |
 | `GET /api/admin/stats?days=N` | 近 N 天聚合统计（含分模型/渠道/密钥明细） |
 | `GET /api/admin/logs/dates` | 有日志的日期列表 |
-| `GET /api/admin/logs/summary?date=&limit=&cursor=&ok=&stream=&model=&q=` | 日志分页查询（支持筛选） |
+| `GET /api/admin/logs/summary?date=&limit=&cursor=&ok=&stream=&finish=&model=&q=` | 日志分页查询（支持筛选；`finish=abnormal` 只看流式异常结束） |
 | `GET /api/admin/log?key=` | 单条日志完整内容 |
 | `POST /api/admin/logs/cleanup` | 清理超过保留期的日志与统计 |
 | `POST /api/admin/logs/clear` | 清空日志：`{scope:"day", date:"YYYY-MM-DD"}` 清空某天，`{scope:"all"}` 清空全部 |
@@ -188,6 +206,7 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
 |---|---|---|
 | `allow_admin_key_as_api_key` | `true` | 是否允许用 `ADMIN_KEY` 直接调用 `/v1/*`（生产建议关闭） |
 | `request_timeout_ms` | `60000` | 上游请求超时（首字节），1000 ~ 600000 |
+| `stream_idle_timeout_ms` | `60000` | 流式响应的静默超时：上游超过该时长一个字节都没下发即判定断流，网关主动断开并收尾，5000 ~ 600000 |
 | `retries` | `1` | 瞬时错误（429/5xx/网络异常）在同一 Key 上的额外重试次数，0 ~ 5 |
 | `log_retention_days` | `30` | 日志保留天数，供「清理过期日志」使用 |
 | `timezone_offset_minutes` | `480` | 统计与日志按哪个「当地日期」归档。480 = UTC+8。**若控制台查不到刚产生的日志，多半是这里与本地时区不一致** |
@@ -215,10 +234,27 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
   并解析上游在流末尾返回的 `usage`，因此流式请求也能精确统计（OpenAI 兼容渠道要求上游支持该参数，
   不支持时网关会自动降级为普通流式，此时该次用量记为 0；Anthropic 渠道直接从原生事件中提取用量）。
   日志中 `usage_missing: true` 表示该次流式请求未能拿到用量。
+- **流式响应中途断了怎么办**：网关有三层保护，先按下面的顺序定位——
+  1. **调用方看到「连接被重置」**：这是修复前的行为。现在上游中途断开时，网关会补一个
+     error 事件 + `data: [DONE]` 后正常收尾，调用方拿到的是明确的错误而不是 TCP 断开。
+  2. **日志里 `finish` 字段**是判断依据：`upstream_error` 表示上游主动断开（常见于
+     nginx `proxy_read_timeout`、中转站限流、上游套上游）；`timeout` 表示触发了静默超时；
+     `client_abort` 表示调用方自己取消了。日志页可直接按「仅异常结束」筛选。
+  3. **长回答必断、短问答正常**：多半是 Workers 的 CPU 时限。检查 Worker 日志里有没有
+     `exceeded CPU time limit`（错误码 `1102`）。免费版只有 10ms CPU，
+     流式长回答容易越线；升级到付费版，或调大 `stream_idle_timeout_ms` 无关，
+     需要减少每块的处理开销（本项目已做字符串快路径优化）。
+  4. **长时间零字节然后被掐断**：调小「流式静默超时」让网关更早介入；
+     同时确认 Anthropic 渠道的 ping 心跳能正常转发（网关已转发为 SSE 注释）。
+- **为什么 `request_timeout_ms` 调大了流还是会卡死**：这个超时只作用于「首字节」
+  （响应头到达即失效），流中途卡死由独立的 `stream_idle_timeout_ms` 负责。
+  两者都需要配置。
 - **费用为什么是估算值**：费用 = 输入 Tokens ÷ 100 万 × 输入价 + 输出 Tokens ÷ 100 万 × 输出价，
   价格来自「网关设置 → 模型定价」，仅用于展示与预算参考，不参与计费。
-- **统计数字偶尔偏小**：按天统计采用「读-改-写」累加，高并发下可能丢失少量计数，
-  用于仪表盘展示足够；精确对账请以请求日志为准。
+- **统计数字偶尔偏小**：按天统计采用「读-改-写」累加，R2 没有 CAS。网关已用
+  per-key 串行队列把同一 isolate 内的并发写排成队，丢计数已大幅减少；
+  但跨 isolate 的竞态仍可能存在，精确对账请以请求日志为准。
+  密钥用量（`used_tokens`）与后台编辑共用同一把锁，编辑不会被并发请求覆盖。
 - **日志列表为什么天然按时间倒序**：日志对象名使用「倒序时间戳」，R2 按 key 升序返回即最新在前，
   因此翻页游标天然指向更早的一页。
 - **Anthropic 渠道注意事项**：

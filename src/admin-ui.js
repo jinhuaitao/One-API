@@ -413,6 +413,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <button class="ghost sm" data-act="log-today">今天</button>
             <select id="logOk" class="sel"><option value="">全部结果</option><option value="ok">仅成功</option><option value="fail">仅失败</option></select>
             <select id="logStream" class="sel"><option value="">全部类型</option><option value="1">流式</option><option value="0">非流式</option></select>
+            <select id="logFinish" class="sel" title="流式结束原因"><option value="">全部结束原因</option><option value="abnormal">仅异常结束（断流）</option></select>
             <input id="logModel" type="text" placeholder="模型筛选" style="width:130px">
             <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="logQ" type="text" placeholder="搜索密钥 / 渠道 / 错误"></div>
             <div class="spacer"></div>
@@ -435,6 +436,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="card-head"><div><h3>性能与容错</h3><p class="desc">作用于所有渠道的默认值，单个渠道可单独覆盖超时</p></div></div>
           <div class="grid">
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
+            <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：上游超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
             <label>瞬时错误重试次数（429 / 5xx / 网络异常）<input type="number" id="s_retries" min="0" max="5" step="1"></label>
           </div>
         </div>
@@ -488,6 +490,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <li><b>重试</b>：429 / 5xx / 网络异常会在同一 Key 上重试（次数可在「网关设置」调整）。</li>
             <li><b>模型映射</b>：网关模型名 → 渠道真实模型名，例如对外叫 <code>gpt-4o-mini</code>，实际走 <code>gpt-4o-mini-2024</code>。映射左侧的名称必须同时出现在渠道的「对外暴露的模型名」中，否则匹配不到该渠道。</li>
             <li><b>模型回显</b>：响应体与流式 SSE 中的 <code>model</code> 会统一改写为调用方请求的网关模型名，调用方不会看到渠道内部的真实模型名。</li>
+            <li><b>流式收尾</b>：上游中途断开时，网关不会让客户端看到「连接被重置」，而是补一个 error 事件 + <code>data: [DONE]</code> 后正常收尾；上游未发送 <code>[DONE]</code> 时由网关补发。</li>
+            <li><b>流式静默超时</b>：流式响应单独有读超时（「网关设置」里的流式静默超时）。上面的请求超时只覆盖到首字节，管不了流中途卡死。超时后网关主动断开并收尾。</li>
+            <li><b>异常结束可观测</b>：日志新增「结束原因」字段（complete / client_abort / upstream_error / timeout），日志页可按「仅异常结束」筛选，用来排查断流。</li>
           </ul>
           <h4>Anthropic 渠道注意事项</h4>
           <ul>
@@ -868,7 +873,8 @@ function renderStats(){
   var rate = t.success_rate || 0;
   var tone = rate >= 99 ? 'ok' : (rate >= 90 ? 'warn' : 'bad');
   var html = '';
-  html += statCard({ label:'请求总数', value: fmtNum(t.requests), sub:'近 ' + RANGE + ' 天 · 流式 ' + fmtNum(t.streams), icon: I.list });
+  var aborted = t.streams_aborted || 0;
+  html += statCard({ label:'请求总数', value: fmtNum(t.requests), sub:'近 ' + RANGE + ' 天 · 流式 ' + fmtNum(t.streams) + (aborted ? ' · 异常结束 ' + fmtNum(aborted) : ''), icon: I.list });
   html += statCard({ label:'成功率', value: rate + '%', sub:'成功 ' + fmtNum(t.ok) + ' · 失败 ' + fmtNum(t.failed), icon: I.check, tone: t.requests ? tone : '' });
   html += statCard({ label:'Tokens', value: fmtNum(t.tokens), sub:'输入 + 输出合计', icon: I.bolt });
   html += statCard({ label:'预估费用', value: '$' + fmtCost(t.cost), sub:'按定价表估算（USD）', icon: I.coin });
@@ -1312,21 +1318,28 @@ function loadLogs(silent){
   LOGF = {
     ok: $('logOk').value,
     stream: $('logStream').value,
+    finish: $('logFinish').value,
     model: ($('logModel').value || '').trim(),
     q: ($('logQ').value || '').trim()
   };
   if(!silent) $('logTable').innerHTML = '<div class="empty">加载中…</div>';
   var qs = 'date=' + encodeURIComponent(d) + '&limit=50';
-  ['ok', 'stream', 'model', 'q'].forEach(function(k){ if(LOGF[k]) qs += '&' + k + '=' + encodeURIComponent(LOGF[k]); });
+  ['ok', 'stream', 'finish', 'model', 'q'].forEach(function(k){ if(LOGF[k]) qs += '&' + k + '=' + encodeURIComponent(LOGF[k]); });
   api('/api/admin/logs/summary?' + qs).then(function(r){
     S.logs = r.logs || [];
     S.logCursor = r.cursor || null;
     renderLogs();
   }).catch(function(e){ toast(e.message, 'bad'); $('logTable').innerHTML = '<div class="empty">加载失败</div>'; });
 }
-var LOGF = { ok:'', stream:'', model:'', q:'' };
+var LOGF = { ok:'', stream:'', finish:'', model:'', q:'' };
+/** 流式结束原因的中文标签（complete 不展示） */
+var FINISH_LABEL = { client_abort: '客户端取消', upstream_error: '上游中断', timeout: '静默超时' };
+function finishChip(l){
+  if(!l.stream || !l.finish || l.finish === 'complete') return '';
+  return ' <span class="chip" title="finish=' + esc(l.finish) + '">' + esc(FINISH_LABEL[l.finish] || l.finish) + '</span>';
+}
 function renderLogs(){
-  var h = '<table><thead><tr><th style="width:150px">时间</th><th style="min-width:150px">调用方</th><th style="min-width:150px">模型</th><th style="width:206px">渠道</th><th style="width:88px">结果</th><th class="ar" style="width:96px">Tokens</th><th class="ar" style="width:84px">耗时</th><th class="ar" style="width:76px">操作</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="width:150px">时间</th><th style="min-width:150px">调用方</th><th style="min-width:150px">模型</th><th style="width:206px">渠道</th><th style="width:172px">结果</th><th class="ar" style="width:96px">Tokens</th><th class="ar" style="width:84px">耗时</th><th class="ar" style="width:76px">操作</th></tr></thead><tbody>';
   if(!S.logs.length){
     h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + esc(S.logDate || '') + ' 暂无符合条件的请求日志</div><div id="logEmptyHint" style="margin-top:12px"></div></div></td></tr>';
   }
@@ -1335,7 +1348,7 @@ function renderLogs(){
       '<td>' + esc(l.key_name || '-') + (l.is_admin ? ' <span class="chip">admin</span>' : '') + '</td>' +
       '<td class="mono">' + esc(l.model || '-') + '</td>' +
       '<td>' + esc(l.channel || '-') + (l.stream ? ' <span class="chip">流式</span>' : '') + (l.retries ? ' <span class="chip">重试' + l.retries + '</span>' : '') + '</td>' +
-      '<td>' + (l.ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad" title="' + esc(l.error) + '">失败</span>') + '</td>' +
+      '<td>' + (l.ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad" title="' + esc(l.error) + '">失败</span>') + finishChip(l) + '</td>' +
       '<td class="ar">' + fmtNum(l.tokens) + '</td>' +
       '<td class="ar nowrap">' + esc(fmtMs(l.ms)) + '</td>' +
       '<td class="ar"><button class="ghost sm" data-act="view-log" data-i="' + i + '">详情</button></td></tr>';
@@ -1366,7 +1379,7 @@ function loadMoreLogs(btn){
   if(!S.logCursor) return;
   btn.disabled = true; btn.textContent = '加载中…';
   var qs = 'date=' + encodeURIComponent(S.logDate) + '&limit=50&cursor=' + encodeURIComponent(S.logCursor);
-  ['ok', 'stream', 'model', 'q'].forEach(function(k){ if(LOGF[k]) qs += '&' + k + '=' + encodeURIComponent(LOGF[k]); });
+  ['ok', 'stream', 'finish', 'model', 'q'].forEach(function(k){ if(LOGF[k]) qs += '&' + k + '=' + encodeURIComponent(LOGF[k]); });
   api('/api/admin/logs/summary?' + qs).then(function(r){
     S.logs = S.logs.concat(r.logs || []);
     S.logCursor = r.cursor || null;
@@ -1383,10 +1396,10 @@ function viewLog(i){
 }
 function exportLogs(){
   if(!S.logs.length){ toast('当前没有可导出的日志', 'bad'); return; }
-  var head = ['time', 'request_id', 'key_name', 'model', 'channel', 'ok', 'stream', 'tokens', 'cost', 'ms', 'error'];
+  var head = ['time', 'request_id', 'key_name', 'model', 'channel', 'ok', 'stream', 'finish', 'tokens', 'cost', 'ms', 'error'];
   var lines = [head.join(',')];
   S.logs.forEach(function(l){
-    var row = [l.ts, l.request_id, l.key_name, l.model, l.channel, l.ok ? 'ok' : 'fail', l.stream ? '1' : '0', l.tokens, l.cost, l.ms, (l.error || '').replace(/[",\\n]/g, ' ')];
+    var row = [l.ts, l.request_id, l.key_name, l.model, l.channel, l.ok ? 'ok' : 'fail', l.stream ? '1' : '0', l.finish || '', l.tokens, l.cost, l.ms, (l.error || '').replace(/[",\\n]/g, ' ')];
     lines.push(row.map(function(v){ return '"' + String(v == null ? '' : v) + '"'; }).join(','));
   });
   var blob = new Blob(['\\ufeff' + lines.join('\\n')], { type: 'text/csv;charset=utf-8' });
@@ -1403,6 +1416,7 @@ function renderSettings(){
   var s = S.settings || {};
   $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
   $('s_timeout').value = s.request_timeout_ms || 60000;
+  $('s_stream_idle').value = s.stream_idle_timeout_ms || 60000;
   $('s_retries').value = s.retries == null ? 1 : s.retries;
   $('s_retention').value = s.log_retention_days || 30;
   $('s_tz').value = s.timezone_offset_minutes == null ? 480 : s.timezone_offset_minutes;
@@ -1439,6 +1453,7 @@ function collectSettings(){
   return {
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
     request_timeout_ms: parseInt($('s_timeout').value, 10) || 60000,
+    stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 60000,
     retries: parseInt($('s_retries').value, 10) || 0,
     log_retention_days: parseInt($('s_retention').value, 10) || 30,
     timezone_offset_minutes: tz,

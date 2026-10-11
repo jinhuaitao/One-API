@@ -14,7 +14,15 @@
  * 路由与容错：
  *  - 按请求 model 匹配渠道 → 按 priority 分组 → 组内按 weight 加权随机 → 失败自动切换
  *  - 单渠道支持多 Key（英文逗号分隔），随机起点轮询，单个 Key 失败自动换下一个
- *  - 可配置请求超时（默认 60s）与瞬时错误重试（429/5xx/网络异常）
+ *  - 可配置请求超时（默认 60s，作用于首字节）与瞬时错误重试（429/5xx/网络异常）
+ *
+ * 流式（SSE）健壮性：
+ *  - 收尾守卫（guardSSEStream）：上游中途断开时不再让错误冒泡成「连接被重置」，
+ *    而是补一个 error 事件 + data: [DONE] 后正常收尾，客户端能拿到明确结束
+ *  - 静默超时（stream_idle_timeout_ms）：流式响应单独有读超时，
+ *    上游长时间零字节即主动断开并收尾（request_timeout_ms 只覆盖首字节）
+ *  - 结束原因可观测：日志记录 finish = complete / client_abort / upstream_error / timeout
+ *  - 上游未发送 [DONE] 时由网关补发；Anthropic 的 ping 心跳会转发为 SSE 注释保活
  *
  * 数据（全部存放于 R2）：
  *  - data/channels.json   渠道配置
@@ -128,6 +136,31 @@ async function r2PutJson(env, key, value) {
   });
 }
 
+/**
+ * 按对象名串行化「读-改-写」。
+ *
+ * R2 没有 CAS，统计与密钥用量都是「读整个 JSON → 改 → 写回」，
+ * 并发请求会互相覆盖（丢计数、用量被回退）。
+ * 这里用一把 per-key 的 promise 队列把同一 isolate 内的并发写排成队，
+ * 能消除绝大多数丢更新；跨 isolate 的竞态依然存在，
+ * 需要精确对账时请以请求日志为准（或改用 Durable Objects）。
+ */
+const rwLocks = new Map();
+
+function withLock(name, fn) {
+  const prev = rwLocks.get(name) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(
+    () => {},
+    () => {}
+  );
+  rwLocks.set(name, tail);
+  tail.then(() => {
+    if (rwLocks.get(name) === tail) rwLocks.delete(name);
+  });
+  return run;
+}
+
 /* ---------------- 设置 ---------------- */
 
 function defaultSettings() {
@@ -138,6 +171,13 @@ function defaultSettings() {
     request_timeout_ms: 60000,
     /** 瞬时错误（429/5xx/网络异常）在同一 Key 上的额外重试次数 */
     retries: 1,
+    /**
+     * 流式响应的「静默超时」（毫秒）：上游超过该时长一个字节都没下发，
+     * 即判定为断流，网关主动断开上游并给客户端一个可解析的收尾。
+     * 注意 request_timeout_ms 只作用于「首字节」，无法覆盖流中途卡死的情况，
+     * 因此流式必须单独有这个读超时。
+     */
+    stream_idle_timeout_ms: 60000,
     /** 请求日志保留天数（供「清理日志」使用） */
     log_retention_days: 30,
     /**
@@ -161,6 +201,12 @@ function normalizeSettings(raw) {
   s.allow_admin_key_as_api_key = s.allow_admin_key_as_api_key !== false;
   s.request_timeout_ms = clampInt(s.request_timeout_ms, 1000, 600000, d.request_timeout_ms);
   s.retries = clampInt(s.retries, 0, 5, d.retries);
+  s.stream_idle_timeout_ms = clampInt(
+    s.stream_idle_timeout_ms,
+    5000,
+    600000,
+    d.stream_idle_timeout_ms
+  );
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
   s.timezone_offset_minutes = clampInt(
     s.timezone_offset_minutes,
@@ -233,21 +279,57 @@ function defaultChannels() {
   ];
 }
 
-/** 首次访问时初始化 R2 数据结构（幂等） */
+/**
+ * 种子数据是否已就绪。
+ *
+ * 模块级标记：单个 isolate 内只真正检查一次。否则每个请求（含 /v1/* 代理）
+ * 都要额外做 3 次串行 R2 GET，白白抬高首字节延迟。
+ * 即使标记失效（新的 isolate），下面的检查也是幂等的，最坏情况只是多读一次。
+ */
+let seeded = false;
+
+/** 首次访问时初始化 R2 数据结构（幂等，且单个 isolate 内只执行一次） */
 async function ensureSeed(env) {
-  if (!(await env.R2.get(CHANNELS_KEY))) {
-    await r2PutJson(env, CHANNELS_KEY, defaultChannels());
-  }
-  if (!(await env.R2.get(KEYS_KEY))) {
-    await r2PutJson(env, KEYS_KEY, []);
-  }
-  if (!(await env.R2.get(SETTINGS_KEY))) {
-    await r2PutJson(env, SETTINGS_KEY, defaultSettings());
+  if (seeded) return;
+  try {
+    // 三个检查彼此独立，并行发起，避免串行等待
+    const [ch, ks, st] = await Promise.all([
+      env.R2.get(CHANNELS_KEY),
+      env.R2.get(KEYS_KEY),
+      env.R2.get(SETTINGS_KEY),
+    ]);
+    const writes = [];
+    if (!ch) writes.push(r2PutJson(env, CHANNELS_KEY, defaultChannels()));
+    if (!ks) writes.push(r2PutJson(env, KEYS_KEY, []));
+    if (!st) writes.push(r2PutJson(env, SETTINGS_KEY, defaultSettings()));
+    if (writes.length) await Promise.all(writes);
+    seeded = true;
+  } catch {
+    // 初始化失败不阻断请求，下次请求会重试
   }
 }
 
+/**
+ * 设置的内存缓存（短 TTL）。
+ *
+ * 设置在每个请求里都会被读到，但改动极少；缓存 2 秒可显著减少 R2 往返，
+ * 同时保证管理后台保存后几乎立刻生效（保存接口会主动失效缓存）。
+ */
+let settingsCache = { at: 0, value: null };
+const SETTINGS_TTL_MS = 2000;
+
+function invalidateSettingsCache() {
+  settingsCache = { at: 0, value: null };
+}
+
 async function loadSettings(env) {
-  return normalizeSettings(await r2GetJson(env, SETTINGS_KEY, null));
+  const now = Date.now();
+  if (settingsCache.value && now - settingsCache.at < SETTINGS_TTL_MS) {
+    return settingsCache.value;
+  }
+  const s = normalizeSettings(await r2GetJson(env, SETTINGS_KEY, null));
+  settingsCache = { at: now, value: s };
+  return s;
 }
 
 /* ---------------- 鉴权 ---------------- */
@@ -377,10 +459,50 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
-    // 超时只作用于「首字节」：响应头返回后即清除定时器，不打断后续流式传输
+    // 超时只作用于「首字节」：响应头返回后即清除定时器，不打断后续流式传输。
+    // 流式传输中途卡死由 guardSSEStream 的静默超时负责；
+    // 非流式响应体的读取由 withBodyTimeout 负责。
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** 计算一次上游请求实际生效的超时（渠道可单独覆盖） */
+function channelTimeoutMs(channel, settings) {
+  return clampInt(
+    (channel && channel.timeout_ms) || (settings && settings.request_timeout_ms) || 60000,
+    1000,
+    600000,
+    60000
+  );
+}
+
+/**
+ * 非流式响应：给「读取响应体」也加上超时。
+ *
+ * fetchWithTimeout 只覆盖到响应头（首字节），若上游发完响应头后卡住不吐 body，
+ * 非流式请求同样会无限挂起。这里用 Promise.race 兜底，超时后主动 cancel 上游 body。
+ */
+async function withBodyTimeout(res, timeoutMs, read) {
+  const ms = clampInt(timeoutMs, 1000, 600000, 60000);
+  let timer = null;
+  try {
+    return await Promise.race([
+      read(res),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            if (res.body) res.body.cancel().catch(() => {});
+          } catch {
+            // 忽略
+          }
+          reject(new Error(`读取上游响应体超时（${ms}ms）`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -569,9 +691,11 @@ function anthropicToOpenAI(data, model) {
 }
 
 /** Anthropic SSE → OpenAI SSE（流式翻译）
- *  onUsage 可选回调：流结束时返回 {prompt_tokens, completion_tokens, total_tokens}，
- *  从 message_start / message_delta 事件中提取；拿不到则为 null */
-function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
+ *  onFinish 可选回调：结束（正常或异常）时返回 (usage, finish)，
+ *  usage 从 message_start / message_delta 事件中提取，拿不到则为 null；
+ *  finish 取值 complete / client_abort / upstream_error / timeout。
+ *  idleMs > 0 时启用静默超时。 */
+function anthropicStreamToOpenAI(upstreamBody, model, onFinish = () => {}, idleMs = 0) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const created = Math.floor(Date.now() / 1000);
@@ -584,11 +708,11 @@ function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
   const toolIndexByBlock = {};
   let toolCounter = 0;
 
-  const settleUsage = (u) => {
+  const settleUsage = (u, finish) => {
     if (usageSettled) return;
     usageSettled = true;
     try {
-      onUsage(u);
+      onFinish(u, finish || 'complete');
     } catch {
       // 忽略
     }
@@ -653,8 +777,12 @@ function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
         outputTokens = p.usage.output_tokens;
     } else if (event === 'message_stop') {
       sse(controller, chunk({}, stopReason || 'stop'));
+    } else if (event === 'ping') {
+      // Anthropic 用 ping 保活。必须转发：模型长时间「思考」时若链路零字节，
+      // 中间的 nginx / CDN / 客户端读超时会主动掐断连接，用户看到的就是断流。
+      controller.enqueue(encoder.encode(': ping\n\n'));
     }
-    // ping / content_block_stop 等事件无需转发
+    // content_block_stop 等事件无需转发
   };
 
   const transform = new TransformStream({
@@ -688,16 +816,19 @@ function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
               completion_tokens: outputTokens,
               total_tokens: total,
             }
-          : null
+          : null,
+        'complete'
       );
     },
   });
 
-  upstreamBody.pipeTo(transform.writable).then(
-    () => {},
-    () => settleUsage(null)
-  );
-  return transform.readable;
+  // 上游错误交给 guardSSEStream 统一收尾并上报结束原因
+  // （正常路径由 flush 先结算 usage，settleUsage 自带幂等保护）
+  upstreamBody.pipeTo(transform.writable).catch(() => {});
+  return guardSSEStream(transform.readable, {
+    onFinish: (reason) => settleUsage(null, reason),
+    idleMs,
+  });
 }
 
 /**
@@ -706,8 +837,13 @@ function anthropicStreamToOpenAI(upstreamBody, model, onUsage = () => {}) {
  * - 只有当整块都由 data: 行组成、且每行都是合法 JSON 时才重写（保留 [DONE]）；
  *   出现 event: / id: / retry: 或非 JSON 数据时，整块原样返回，避免破坏协议。
  * - usage 提取依赖上游支持 stream_options.include_usage（[DONE] 前会有一个只带 usage 的 chunk）。
+ * - 快路径：既不含 "model" 也不含 "usage" 的块直接原样返回，跳过 JSON 解析/序列化。
+ *   这一步很关键——长回答有上千个 chunk，每个都 parse+stringify 会累积大量 CPU 时间，
+ *   越过 Workers 的 CPU 时限后请求会被运行时直接终止，表现就是「流到一半断掉」。
  */
 function rewriteSseBlock(raw, model, onUsage) {
+  if (!raw.includes('"model"') && !raw.includes('"usage"')) return raw;
+
   const lines = raw.split('\n');
   const out = [];
   for (const line of lines) {
@@ -734,23 +870,151 @@ function rewriteSseBlock(raw, model, onUsage) {
   return out.length ? out.join('\n') : raw;
 }
 
+/** 判断一个 SSE 块是否是结束标记（精确匹配，避免把正文里的 "[DONE]" 误判） */
+const isDoneBlock = (raw) => /^\s*data:\s*\[DONE\]\s*$/m.test(raw);
+
+/**
+ * 给 SSE 流套一层「收尾守卫」。
+ *
+ * 解决断流的核心：上游中途断开时，如果直接让错误冒泡，
+ * 客户端看到的是一次「连接被重置」——既不完整、也无法判断是网关问题还是上游问题。
+ * 这里把异常转换成一次可控收尾：补一个 error 事件 + data: [DONE] 再正常 close，
+ * 客户端能拿到明确结束，而不是 TCP 层被掐断。
+ *
+ * 同时负责两件事：
+ *  - 静默超时（idleMs）：上游超过该时长一个字节都没下发，主动断开上游并收尾；
+ *  - 结束原因回报（onFinish）：complete / client_abort / upstream_error / timeout，
+ *    让「断流」第一次变得可观测。
+ */
+function guardSSEStream(src, { onFinish, idleMs = 0 } = {}) {
+  const encoder = new TextEncoder();
+  let reader = null;
+  let idleTimer = null;
+  let settled = false;
+  let timedOut = false;
+
+  const settle = (reason) => {
+    if (settled) return;
+    settled = true;
+    try {
+      onFinish(reason);
+    } catch {
+      // 忽略
+    }
+  };
+
+  const clearIdle = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
+  const tail = (reason) => {
+    const message =
+      reason === 'timeout'
+        ? '上游超过静默超时未返回数据，网关已中断本次流式响应'
+        : '上游流式响应中途中断，网关已提前结束本次流式响应';
+    return (
+      'data: ' +
+      JSON.stringify({
+        error: { message, type: 'gateway_stream_error', code: reason },
+      }) +
+      '\n\n' +
+      'data: [DONE]\n\n'
+    );
+  };
+
+  return new ReadableStream({
+    async start(controller) {
+      reader = src.getReader();
+      const arm = () => {
+        if (!idleMs) return;
+        clearIdle();
+        idleTimer = setTimeout(() => {
+          timedOut = true;
+          // 主动断开上游：挂起的 read() 会以 done 结束，随后走超时收尾
+          try {
+            reader.cancel('idle-timeout');
+          } catch {
+            // 忽略
+          }
+        }, idleMs);
+      };
+
+      try {
+        arm();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          arm();
+          controller.enqueue(value);
+        }
+        clearIdle();
+        if (timedOut) {
+          try {
+            controller.enqueue(encoder.encode(tail('timeout')));
+          } catch {
+            // 忽略
+          }
+          settle('timeout');
+        } else {
+          settle('complete');
+        }
+        try {
+          controller.close();
+        } catch {
+          // 忽略
+        }
+      } catch (e) {
+        clearIdle();
+        if (!settled) {
+          try {
+            controller.enqueue(encoder.encode(tail('upstream_error')));
+          } catch {
+            // 忽略
+          }
+        }
+        try {
+          controller.close();
+        } catch {
+          // 忽略
+        }
+        settle(e && e.name === 'AbortError' ? 'timeout' : 'upstream_error');
+      }
+    },
+    cancel(reason) {
+      clearIdle();
+      settle('client_abort');
+      try {
+        if (reader) reader.cancel(reason);
+      } catch {
+        // 忽略
+      }
+    },
+  });
+}
+
 /**
  * 透传 OpenAI SSE 流：逐块改写 model 为网关模型名，并提取末尾的 usage。
  * 数据内容除 model 字段外保持不变，不影响流式体验；
- * 流结束（或中断）时通过 onUsage 回调返回 {prompt_tokens, completion_tokens, total_tokens}，
- * 拿不到则为 null。
+ * 结束（正常或异常）时通过 onFinish(usage, finish) 回调上报，
+ * finish 取值：complete / client_abort / upstream_error / timeout。
+ * idleMs > 0 时启用静默超时（上游超过该时长无任何字节即判定断流）。
  */
-function rewriteOpenAISSE(upstreamBody, model, onUsage = () => {}) {
+function rewriteOpenAISSE(upstreamBody, model, onFinish = () => {}, idleMs = 0) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
   let usage = null;
   let settled = false;
-  const done = (u) => {
+  let sawDone = false;
+
+  const done = (finish) => {
     if (settled) return;
     settled = true;
     try {
-      onUsage(u);
+      onFinish(usage, finish);
     } catch {
       // 忽略
     }
@@ -766,22 +1030,24 @@ function rewriteOpenAISSE(upstreamBody, model, onUsage = () => {}) {
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
+        if (isDoneBlock(raw)) sawDone = true;
         controller.enqueue(encoder.encode(rewriteSseBlock(raw, model, capture) + '\n\n'));
       }
     },
     flush(controller) {
       if (buffer.trim()) {
+        if (isDoneBlock(buffer)) sawDone = true;
         controller.enqueue(encoder.encode(rewriteSseBlock(buffer, model, capture)));
       }
-      done(usage);
+      // 部分兼容上游不会发送 [DONE]，由网关补上，避免客户端一直等不到流结束
+      if (!sawDone) controller.enqueue(encoder.encode('\n\ndata: [DONE]\n\n'));
+      done('complete');
     },
   });
 
-  upstreamBody.pipeTo(transform.writable).then(
-    () => {},
-    () => done(usage)
-  );
-  return transform.readable;
+  // 上游错误不再在这里吞掉：交给 guardSSEStream 统一收尾并上报结束原因
+  upstreamBody.pipeTo(transform.writable).catch(() => {});
+  return guardSSEStream(transform.readable, { onFinish: done, idleMs });
 }
 
 /* ---------------- 上游转发 ---------------- */
@@ -791,6 +1057,14 @@ function upstreamHeaders(channel, base) {
   return { ...base, ...extra };
 }
 
+/**
+ * 已知不支持 stream_options 的渠道（模块级 best-effort）。
+ * 命中后不再注入该参数，省掉每个请求都白试一次的开销。
+ */
+const usageUnsupportedChannels = new Set();
+
+const channelTag = (ch) => String(ch.id || ch.name || ch.base_url || 'unknown');
+
 async function forwardOpenAI(channel, apiKey, path, payload, settings) {
   const url = channel.base_url.replace(/\/+$/, '') + path;
   const body = { ...payload };
@@ -799,12 +1073,14 @@ async function forwardOpenAI(channel, apiKey, path, payload, settings) {
     body.model = channel.model_map[body.model];
   }
   // 流式请求尝试索取 usage（用于精确统计 token）；上游不支持该参数时自动降级重试
-  const wantUsage = body.stream && path === '/v1/chat/completions';
+  const wantUsage =
+    body.stream &&
+    path === '/v1/chat/completions' &&
+    !usageUnsupportedChannels.has(channelTag(channel));
   if (wantUsage) {
     body.stream_options = { ...(body.stream_options || {}), include_usage: true };
   }
-  const timeout =
-    channel.timeout_ms || (settings && settings.request_timeout_ms) || 60000;
+  const timeout = channelTimeoutMs(channel, settings);
   const doFetch = (b) =>
     fetchWithTimeout(
       url,
@@ -818,18 +1094,48 @@ async function forwardOpenAI(channel, apiKey, path, payload, settings) {
       },
       timeout
     );
+
   let res = await doFetch(body);
-  if (wantUsage && res.status === 400) {
-    const fallback = { ...body };
-    delete fallback.stream_options;
-    const retry = await doFetch(fallback);
-    if (retry.ok) {
-      res = retry;
-    } else {
+
+  // 降级：上游不接受 stream_options 时去掉该参数重试。
+  // 不局限于 HTTP 400 —— 实测上游可能返回 422 / 404，或用别的文案报「参数不支持」。
+  // 只克隆响应体做探测，不消耗原响应，保证失败路径仍能拿到完整错误信息。
+  if (wantUsage && res.status >= 400 && res.status < 500) {
+    let text = '';
+    try {
+      text = await res.clone().text();
+    } catch {
+      // 拿不到文本就只按状态码判断
+    }
+    const looksUnsupported =
+      res.status === 400 ||
+      /stream_options|include_usage|unsupported|unrecognized|unknown|invalid|extra/i.test(
+        text
+      );
+    if (looksUnsupported) {
+      usageUnsupportedChannels.add(channelTag(channel));
+      const fallback = { ...body };
+      delete fallback.stream_options;
+      let retry = null;
       try {
-        await retry.body.cancel();
+        retry = await doFetch(fallback);
       } catch {
-        // 忽略
+        retry = null;
+      }
+      if (retry && retry.ok) {
+        // 释放原响应体，避免未消费的子请求一直挂着
+        try {
+          await res.body?.cancel();
+        } catch {
+          // 忽略
+        }
+        res = retry;
+      } else if (retry) {
+        try {
+          await retry.body?.cancel();
+        } catch {
+          // 忽略
+        }
       }
     }
   }
@@ -838,8 +1144,7 @@ async function forwardOpenAI(channel, apiKey, path, payload, settings) {
 
 async function forwardAnthropic(channel, apiKey, payload, settings) {
   const url = channel.base_url.replace(/\/+$/, '') + '/v1/messages';
-  const timeout =
-    channel.timeout_ms || (settings && settings.request_timeout_ms) || 60000;
+  const timeout = channelTimeoutMs(channel, settings);
   const res = await fetchWithTimeout(
     url,
     {
@@ -896,6 +1201,7 @@ function emptyDaily(date) {
     tokens: 0,
     cost: 0,
     streams: 0,
+    streams_aborted: 0,
     latency_sum: 0,
     latency_n: 0,
     models: {},
@@ -915,48 +1221,55 @@ function bumpBucket(map, name, entry) {
   b.cost = round8(b.cost + (entry.cost || 0));
 }
 
-/** 按天聚合统计（尽力而为：并发写可能轻微丢失计数，用于仪表盘展示足够） */
+/** 按天聚合统计（同一 isolate 内按天串行化，尽量避免并发丢计数） */
 async function bumpStats(env, entry, settings) {
   try {
     const date = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     const key = STATS_PREFIX + date + '.json';
-    const s = (await r2GetJson(env, key, null)) || emptyDaily(date);
-    s.requests = (s.requests || 0) + 1;
-    if (entry.ok) s.ok = (s.ok || 0) + 1;
-    else s.failed = (s.failed || 0) + 1;
-    s.tokens = (s.tokens || 0) + (entry.tokens || 0);
-    s.cost = round8((s.cost || 0) + (entry.cost || 0));
-    if (entry.stream) s.streams = (s.streams || 0) + 1;
-    s.latency_sum = (s.latency_sum || 0) + (entry.ms || 0);
-    s.latency_n = (s.latency_n || 0) + 1;
-    s.models = s.models || {};
-    s.channels = s.channels || {};
-    s.keys = s.keys || {};
-    s.hours = s.hours || {};
-    bumpBucket(s.models, entry.model, entry);
-    bumpBucket(s.channels, entry.channel, entry);
-    bumpBucket(s.keys, entry.key_name, entry);
-    const hour = hourStr(Date.now(), settings && settings.timezone_offset_minutes);
-    s.hours[hour] = (s.hours[hour] || 0) + 1;
-    await r2PutJson(env, key, s);
+    await withLock(key, async () => {
+      const s = (await r2GetJson(env, key, null)) || emptyDaily(date);
+      s.requests = (s.requests || 0) + 1;
+      if (entry.ok) s.ok = (s.ok || 0) + 1;
+      else s.failed = (s.failed || 0) + 1;
+      s.tokens = (s.tokens || 0) + (entry.tokens || 0);
+      s.cost = round8((s.cost || 0) + (entry.cost || 0));
+      if (entry.stream) s.streams = (s.streams || 0) + 1;
+      if (entry.stream && entry.finish && entry.finish !== 'complete') {
+        s.streams_aborted = (s.streams_aborted || 0) + 1;
+      }
+      s.latency_sum = (s.latency_sum || 0) + (entry.ms || 0);
+      s.latency_n = (s.latency_n || 0) + 1;
+      s.models = s.models || {};
+      s.channels = s.channels || {};
+      s.keys = s.keys || {};
+      s.hours = s.hours || {};
+      bumpBucket(s.models, entry.model, entry);
+      bumpBucket(s.channels, entry.channel, entry);
+      bumpBucket(s.keys, entry.key_name, entry);
+      const hour = hourStr(Date.now(), settings && settings.timezone_offset_minutes);
+      s.hours[hour] = (s.hours[hour] || 0) + 1;
+      await r2PutJson(env, key, s);
+    });
   } catch {
     // 统计失败不影响主流程
   }
 }
 
-/** 累加 Key 的用量与费用 */
+/** 累加 Key 的用量与费用（按 keys.json 串行化，避免并发覆盖） */
 async function bumpKeyUsage(env, auth, tokens, cost) {
   if (!auth || auth.admin || !auth.record) return;
   try {
-    const keys = await r2GetJson(env, KEYS_KEY, []);
-    const rec = keys.find((k) => k.key === auth.record.key);
-    if (rec) {
-      rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
-      rec.requests = (rec.requests || 0) + 1;
-      rec.used_cost = round8((rec.used_cost || 0) + (cost || 0));
-      rec.last_used_at = nowIso();
-      await r2PutJson(env, KEYS_KEY, keys);
-    }
+    await withLock(KEYS_KEY, async () => {
+      const keys = await r2GetJson(env, KEYS_KEY, []);
+      const rec = keys.find((k) => k.key === auth.record.key);
+      if (rec) {
+        rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
+        rec.requests = (rec.requests || 0) + 1;
+        rec.used_cost = round8((rec.used_cost || 0) + (cost || 0));
+        rec.last_used_at = nowIso();
+        await r2PutJson(env, KEYS_KEY, keys);
+      }
+    });
   } catch {
     // 用量统计失败不影响主流程
   }
@@ -975,6 +1288,8 @@ function recordRequest(env, ctx, o) {
         channel: o.channel,
         ok: o.ok,
         stream: !!o.stream,
+        // 流式结束原因：complete / client_abort / upstream_error / timeout
+        finish: o.stream ? o.finish || 'complete' : undefined,
         tokens,
         cost,
         ms: o.ms,
@@ -988,6 +1303,7 @@ function recordRequest(env, ctx, o) {
         key_name: o.auth && o.auth.name,
         ok: o.ok,
         stream: !!o.stream,
+        finish: o.finish,
         tokens,
         cost,
         ms: o.ms,
@@ -1054,6 +1370,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
 
       for (let attempt = 0; attempt <= retries; attempt++) {
         try {
+          const timeoutMs = channelTimeoutMs(ch, settings);
           const { res: upstream, translated } = await forwardOnce(
             ch,
             apiKey,
@@ -1062,7 +1379,9 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             settings
           );
           if (!upstream.ok) {
-            const text = await upstream.text().catch(() => '');
+            const text = await withBodyTimeout(upstream, timeoutMs, (r) => r.text()).catch(
+              () => ''
+            );
             failures.push(
               `${ch.name}${tag}: HTTP ${upstream.status} ${text.slice(0, 200)}`
             );
@@ -1073,29 +1392,57 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             break; // 换下一个 Key
           }
 
+          // 是否真的是 SSE：部分上游会无视 stream:true 直接返回 JSON，
+          // 此时不能硬套 text/event-stream，否则客户端按 SSE 解析必然失败。
+          const upstreamCT = upstream.headers.get('content-type') || '';
+          const isSse = !upstreamCT || /text\/event-stream/i.test(upstreamCT);
+
           // 流式请求：OpenAI 渠道透传 SSE 并解析 usage，Anthropic 渠道翻译为 OpenAI 格式 SSE 并提取 usage
-          if (body.stream) {
-            let resolveUsage;
-            const usagePromise = new Promise((r) => {
-              resolveUsage = r;
+          if (body.stream && isSse) {
+            if (!upstream.body) {
+              failures.push(`${ch.name}${tag}: 上游返回 200 但没有流式响应体`);
+              break; // 换下一个 Key
+            }
+            let resolveFinish;
+            const finishPromise = new Promise((r) => {
+              resolveFinish = r;
             });
+            // finish: complete / client_abort / upstream_error / timeout
+            const onFinish = (usage, finish) =>
+              resolveFinish({ usage, finish: finish || 'complete' });
             const streamBody = translated
-              ? anthropicStreamToOpenAI(upstream.body, body.model, (u) => resolveUsage(u))
-              : rewriteOpenAISSE(upstream.body, body.model, (u) => resolveUsage(u));
+              ? anthropicStreamToOpenAI(
+                  upstream.body,
+                  body.model,
+                  onFinish,
+                  settings.stream_idle_timeout_ms
+                )
+              : rewriteOpenAISSE(
+                  upstream.body,
+                  body.model,
+                  onFinish,
+                  settings.stream_idle_timeout_ms
+                );
             ctx.waitUntil(
-              usagePromise
-                .then((usage) =>
+              finishPromise
+                .then(({ usage, finish }) =>
                   recordRequest(env, ctx, {
                     auth,
                     settings,
                     request_id: requestId,
                     model: body.model,
                     channel: ch.name,
-                    ok: true,
+                    // 客户端主动取消不算网关失败；上游中断/超时才算
+                    ok: finish === 'complete' || finish === 'client_abort',
                     stream: true,
+                    finish,
                     usage,
                     ms: Date.now() - started,
                     retries: attempt,
+                    error:
+                      finish === 'complete' || finish === 'client_abort'
+                        ? undefined
+                        : `stream_${finish}`,
                   })
                 )
                 .catch(() => {})
@@ -1103,8 +1450,9 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             return new Response(streamBody, {
               status: upstream.status,
               headers: {
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
+                'Content-Type': upstreamCT || 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                'X-Accel-Buffering': 'no',
                 'X-Request-Id': requestId,
                 ...CORS,
               },
@@ -1113,8 +1461,11 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
 
           // 非流式：Anthropic 响应翻译为 OpenAI 格式（含 usage，可正常计费）
           const data = translated
-            ? anthropicToOpenAI(await upstream.json(), body.model)
-            : await upstream.json();
+            ? anthropicToOpenAI(
+                await withBodyTimeout(upstream, timeoutMs, (r) => r.json()),
+                body.model
+              )
+            : await withBodyTimeout(upstream, timeoutMs, (r) => r.json());
           // 回显网关模型名：上游可能把 model 改写为真实模型名（如 deepseek-v4-flash-0731），
           // 这里统一还原为调用方请求的名字，避免调用方看到渠道内部名称
           if (data && typeof data === 'object' && !Array.isArray(data) && data.model !== undefined) {
@@ -1178,6 +1529,9 @@ function summarizeLog(key, d) {
     cost: d.cost || 0,
     ms: d.ms || 0,
     stream: !!d.stream,
+    // 流式结束原因：complete / client_abort / upstream_error / timeout
+    finish: d.finish || '',
+    usage_missing: !!d.usage_missing,
     retries: d.retries || 0,
     error: d.error ? String(d.error).slice(0, 300) : '',
   };
@@ -1187,6 +1541,7 @@ function matchLog(l, f) {
   if (f.ok === 'ok' && !l.ok) return false;
   if (f.ok === 'fail' && l.ok) return false;
   if (f.stream === '1' && !l.stream) return false;
+  if (f.finish === 'abnormal' && (!l.finish || l.finish === 'complete')) return false;
   if (f.model && String(l.model || '').toLowerCase().indexOf(f.model.toLowerCase()) < 0)
     return false;
   if (f.q) {
@@ -1268,6 +1623,7 @@ async function loadStats(env, days, settings) {
     tokens: 0,
     cost: 0,
     streams: 0,
+    streams_aborted: 0,
     latency_sum: 0,
     latency_n: 0,
   };
@@ -1286,6 +1642,7 @@ async function loadStats(env, days, settings) {
       tokens: s.tokens || 0,
       cost: s.cost || 0,
       streams: s.streams || 0,
+      streams_aborted: s.streams_aborted || 0,
       avg_ms: s.latency_n ? Math.round(s.latency_sum / s.latency_n) : 0,
       hours: s.hours || {},
     });
@@ -1295,6 +1652,7 @@ async function loadStats(env, days, settings) {
     totals.tokens += s.tokens || 0;
     totals.cost = round8(totals.cost + (s.cost || 0));
     totals.streams += s.streams || 0;
+    totals.streams_aborted += s.streams_aborted || 0;
     totals.latency_sum += s.latency_sum || 0;
     totals.latency_n += s.latency_n || 0;
     mergeBuckets(models, s.models);
@@ -1311,6 +1669,7 @@ async function loadStats(env, days, settings) {
       tokens: totals.tokens,
       cost: totals.cost,
       streams: totals.streams,
+      streams_aborted: totals.streams_aborted,
       avg_ms: totals.latency_n ? Math.round(totals.latency_sum / totals.latency_n) : 0,
       success_rate: totals.requests
         ? Math.round((totals.ok / totals.requests) * 1000) / 10
@@ -1362,6 +1721,7 @@ async function testChannel(env, ch, settings) {
     return { ok: false, keys: [], error: '该渠道未配置 API Key' };
   }
   const model = (ch.models || []).find((m) => m !== '*') || 'test';
+  const timeoutMs = channelTimeoutMs(ch, settings);
   const results = [];
   for (let i = 0; i < keys.length; i++) {
     const started = Date.now();
@@ -1375,7 +1735,9 @@ async function testChannel(env, ch, settings) {
       );
       const ms = Date.now() - started;
       if (!upstream.ok) {
-        const text = await upstream.text().catch(() => '');
+        const text = await withBodyTimeout(upstream, timeoutMs, (r) => r.text()).catch(
+          () => ''
+        );
         results.push({
           index: i + 1,
           ok: false,
@@ -1385,7 +1747,9 @@ async function testChannel(env, ch, settings) {
         });
         continue;
       }
-      const data = await upstream.json().catch(() => null);
+      const data = await withBodyTimeout(upstream, timeoutMs, (r) => r.json()).catch(
+        () => null
+      );
       let snippet = '';
       if (translated && data) {
         snippet = (data.content || [])
@@ -1409,14 +1773,16 @@ async function testChannel(env, ch, settings) {
   return { ok: results.some((r) => r.ok), keys: results };
 }
 
-/** 记录渠道健康状态到渠道配置（best-effort） */
+/** 记录渠道健康状态到渠道配置（best-effort，与后台编辑共用同一把锁避免互相覆盖） */
 async function saveChannelHealth(env, channelId, health) {
   try {
-    const channels = await r2GetJson(env, CHANNELS_KEY, []);
-    const idx = channels.findIndex((c) => c.id === channelId);
-    if (idx < 0) return;
-    channels[idx].health = { ...health, checked_at: nowIso() };
-    await r2PutJson(env, CHANNELS_KEY, channels);
+    await withLock(CHANNELS_KEY, async () => {
+      const channels = await r2GetJson(env, CHANNELS_KEY, []);
+      const idx = channels.findIndex((c) => c.id === channelId);
+      if (idx < 0) return;
+      channels[idx].health = { ...health, checked_at: nowIso() };
+      await r2PutJson(env, CHANNELS_KEY, channels);
+    });
   } catch {
     // 忽略
   }
@@ -1448,6 +1814,7 @@ async function handleAdmin(env, ctx, request) {
     if (!body || typeof body !== 'object') return err('请求体应为 JSON 对象', 400, 'invalid_body');
     const next = normalizeSettings({ ...settings, ...body });
     await r2PutJson(env, SETTINGS_KEY, next);
+    invalidateSettingsCache(); // 立即生效，不等 TTL 过期
     return json({ ok: true, settings: next });
   }
 
@@ -1460,7 +1827,8 @@ async function handleAdmin(env, ctx, request) {
     if (!body || !Array.isArray(body.channels)) {
       return err('请求体应为 {channels: [...]}', 400, 'invalid_body');
     }
-    await r2PutJson(env, CHANNELS_KEY, body.channels);
+    // 与健康巡检共用一把锁，避免刚保存的配置被并发的巡检写回覆盖
+    await withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels));
     return json({ ok: true });
   }
 
@@ -1473,7 +1841,8 @@ async function handleAdmin(env, ctx, request) {
     if (!body || !Array.isArray(body.keys)) {
       return err('请求体应为 {keys: [...]}', 400, 'invalid_body');
     }
-    await r2PutJson(env, KEYS_KEY, body.keys);
+    // 与用量累加共用一把锁，避免编辑被并发请求的用量写回覆盖
+    await withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys));
     return json({ ok: true });
   }
 
@@ -1499,6 +1868,7 @@ async function handleAdmin(env, ctx, request) {
       cursor: url.searchParams.get('cursor') || undefined,
       ok: url.searchParams.get('ok') || '',
       stream: url.searchParams.get('stream') || '',
+      finish: url.searchParams.get('finish') || '',
       model: url.searchParams.get('model') || '',
       q: url.searchParams.get('q') || '',
     });
@@ -1609,11 +1979,18 @@ async function handleAdmin(env, ctx, request) {
           settings
         );
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
+          const text = await withBodyTimeout(res, channelTimeoutMs(ch, settings), (r) =>
+            r.text()
+          ).catch(() => '');
           attempts.push({ channel: ch.name, ok: false, http_status: res.status, error: text.slice(0, 200) });
           continue;
         }
-        const data = translated ? anthropicToOpenAI(await res.json(), model) : await res.json();
+        const data = translated
+          ? anthropicToOpenAI(
+              await withBodyTimeout(res, channelTimeoutMs(ch, settings), (r) => r.json()),
+              model
+            )
+          : await withBodyTimeout(res, channelTimeoutMs(ch, settings), (r) => r.json());
         answer = data && data.choices && data.choices[0] ? String(data.choices[0].message?.content || '') : '';
         attempts.push({ channel: ch.name, ok: true, http_status: res.status });
         break;
@@ -1729,6 +2106,10 @@ export {
   anthropicToOpenAI,
   anthropicStreamToOpenAI,
   rewriteSseBlock,
+  rewriteOpenAISSE,
+  guardSSEStream,
+  withBodyTimeout,
+  channelTimeoutMs,
   usageCost,
   normalizeSettings,
   pickChannels,
