@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.2.1';
+const VERSION = '2.2.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
@@ -47,53 +47,12 @@ const LOG_PREFIX = 'logs/';
 /** 13 位时间戳上限，用于生成「越大越新」的倒序 key */
 const LOG_TS_MAX = 9999999999999;
 
-/**
- * CORS 响应头：允许的来源由设置项 `cors_allow_origin` 控制。
- * - '*'（默认）：允许任意源，保持兼容。注意：'*' + Bearer 鉴权意味着拿到网关 Key
- *   的任意网站都能在浏览器里直接调用网关；Key 只给可信前端使用时建议收紧。
- * - 单个源（如 https://app.example.com）：只允许该源。
- * - 逗号分隔的多个源：按请求的 Origin 回显命中的源；未命中则不返回
- *   Access-Control-Allow-Origin，浏览器会拦截该跨域响应。
- */
-function corsHeaders(allowOrigin, reqOrigin) {
-  let origin = '*';
-  const cfg = String(allowOrigin == null ? '*' : allowOrigin).trim();
-  if (cfg && cfg !== '*') {
-    const list = cfg
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (list.length === 1) {
-      origin = list[0];
-    } else if (reqOrigin && list.includes(reqOrigin)) {
-      origin = reqOrigin; // 回显命中的源（带凭据的 CORS 不能用 '*'）
-    } else {
-      origin = ''; // 未命中白名单：不返回该头
-    }
-  }
-  const h = {
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Key',
-    'Access-Control-Max-Age': '86400',
-  };
-  if (origin) h['Access-Control-Allow-Origin'] = origin;
-  return h;
-}
-
-/** 服务端 Origin 门控：浏览器跨域请求（带 Origin 头）是否在白名单内。
- *  非浏览器客户端不带 Origin 头，不受影响。 */
-function originAllowed(allowOrigin, reqOrigin) {
-  const cfg = String(allowOrigin == null ? '*' : allowOrigin).trim();
-  if (!cfg || cfg === '*') return true;
-  const list = cfg
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return list.includes(reqOrigin);
-}
-
-/** 默认 CORS 头（未加载设置时的回退，保持与旧版一致的 '*' 行为） */
-const CORS = corsHeaders('*');
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Key',
+  'Access-Control-Max-Age': '86400',
+};
 
 const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
@@ -106,8 +65,8 @@ const json = (data, status = 200, extra = {}) =>
     },
   });
 
-const err = (message, status = 400, code = 'error', extra = {}) =>
-  json({ error: { message, code } }, status, extra);
+const err = (message, status = 400, code = 'error') =>
+  json({ error: { message, code } }, status);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
@@ -327,16 +286,6 @@ function defaultSettings() {
      * 保留最近 backup_keep_days 份（超期自动清理）。0 = 关闭自动备份。
      */
     backup_keep_days: 7,
-    /**
-     * 跨域允许的来源（CORS）：'*'（默认，允许任意源，保持兼容）；
-     * 设为单个源（如 https://app.example.com）则只允许该源；
-     * 逗号分隔多个源则按请求 Origin 回显命中的源。
-     * 注意：'*' + Bearer 鉴权意味着拿到网关 Key 的任意网站都能在浏览器里调用；
-     * 若 Key 只分发给可信前端，建议收紧为具体域名。
-     * 非 '*' 时网关还会对 /v1/* 做服务端 Origin 门控：不在白名单的浏览器
-     * 跨域请求直接 403（非浏览器客户端不带 Origin 头，不受影响）。
-     */
-    cors_allow_origin: '*',
   };
 }
 
@@ -395,18 +344,6 @@ function normalizeSettings(raw) {
   // RPM 软上限与备份保留份数
   s.rpm_default = clampInt(s.rpm_default, 0, 100000, 0);
   s.backup_keep_days = clampInt(s.backup_keep_days, 0, 365, 7);
-  // CORS 来源白名单：'*' 或逗号分隔的源列表；非法值回退 '*'
-  {
-    const raw = String(s.cors_allow_origin == null ? '*' : s.cors_allow_origin).trim();
-    s.cors_allow_origin =
-      !raw || raw === '*'
-        ? '*'
-        : raw
-            .split(',')
-            .map((x) => x.trim())
-            .filter((x) => /^https?:\/\/[^/]+$/i.test(x))
-            .join(',') || '*';
-  }
   // Telegram 通知配置
   s.tg_bot_token = String(s.tg_bot_token || '').trim();
   s.tg_chat_id = String(s.tg_chat_id || '').trim();
@@ -622,10 +559,9 @@ async function hashKeyRecords(list) {
 }
 
 async function requireAdmin(env, request) {
-  // 仅接受请求头 X-Admin-Key。Admin Key 若出现在 URL 查询参数中，会残留在
-  // 浏览器历史、代理/网关访问日志与 Referer 里，显著扩大泄露面，因此不再支持
-  // ?admin_key= 传参（控制台前端本就使用请求头方式，不受影响）。
-  const key = request.headers.get('X-Admin-Key');
+  const url = new URL(request.url);
+  const key =
+    request.headers.get('X-Admin-Key') || url.searchParams.get('admin_key');
   if (!env.ADMIN_KEY) {
     return {
       ok: false,
@@ -1809,16 +1745,13 @@ function recordRequest(env, ctx, o) {
 /* ---------------- 代理主流程 ---------------- */
 
 async function handleProxy(env, ctx, request, path, auth, settings) {
-  // 本次请求的 CORS 头：按 cors_allow_origin 配置 + 请求 Origin 计算
-  //（fetch 入口已做服务端 Origin 门控，能进到这里的一定是允许的来源）
-  const proxyCors = corsHeaders(settings.cors_allow_origin, request.headers.get('Origin'));
   let body;
   try {
     body = await request.json();
   } catch {
-    return err('请求体必须是合法 JSON', 400, 'invalid_json', proxyCors);
+    return err('请求体必须是合法 JSON', 400, 'invalid_json');
   }
-  if (!body.model) return err('缺少 model 参数', 400, 'missing_model', proxyCors);
+  if (!body.model) return err('缺少 model 参数', 400, 'missing_model');
 
   // 密钥 RPM 软限流（isolate 级，防单 Key 打爆上游；强配额走 quota_tokens）
   if (!checkRpm(auth, settings)) {
@@ -1835,8 +1768,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     return err(
       '该 Key 已达到每分钟请求数（RPM）上限，请稍后再试',
       429,
-      'rate_limited',
-      proxyCors
+      'rate_limited'
     );
   }
 
@@ -1849,7 +1781,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
       !allowed.includes('*') &&
       !allowed.includes(body.model)
     ) {
-      return err(`该密钥不允许调用模型 ${body.model}`, 403, 'model_forbidden', proxyCors);
+      return err(`该密钥不允许调用模型 ${body.model}`, 403, 'model_forbidden');
     }
   }
 
@@ -1878,14 +1810,10 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
       ms: 0,
       error: 'no_channel',
     });
-    return err(`没有可用渠道支持模型 ${body.model}`, 503, 'no_channel', proxyCors);
+    return err(`没有可用渠道支持模型 ${body.model}`, 503, 'no_channel');
   }
 
   const failures = [];
-  // 对外展示的失败摘要：只保留渠道名与 HTTP 状态，不含上游错误原文
-  //（部分上游的错误体会回显请求片段，直接返回给调用方有轻微信息泄露风险；
-  // 完整错误仍写入请求日志，管理员可用 X-Request-Id 定位）
-  const publicFailures = [];
   const retries = settings.retries | 0;
 
   for (const ch of candidates) {
@@ -1914,7 +1842,6 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             failures.push(
               `${ch.name}${tag}: HTTP ${upstream.status} ${text.slice(0, 200)}`
             );
-            publicFailures.push(`${ch.name}${tag}: HTTP ${upstream.status}`);
             // 渠道侧失败（5xx / 408 / 429）计入熔断；4xx 参数与鉴权问题是调用方的问题
             if (upstream.status >= 500 || upstream.status === 408 || upstream.status === 429) {
               markChannelFailure(env, ctx, ch.name, settings);
@@ -1935,7 +1862,6 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
           if (body.stream && isSse) {
             if (!upstream.body) {
               failures.push(`${ch.name}${tag}: 上游返回 200 但没有流式响应体`);
-              publicFailures.push(`${ch.name}${tag}: 上游无流式响应体`);
               markChannelFailure(env, ctx, ch.name, settings);
               break; // 换下一个 Key
             }
@@ -2004,7 +1930,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                 'Cache-Control': 'no-cache, no-transform',
                 'X-Accel-Buffering': 'no',
                 'X-Request-Id': requestId,
-                ...proxyCors,
+                ...CORS,
               },
             });
           }
@@ -2033,14 +1959,10 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             ms: Date.now() - started,
             retries: attempt,
           });
-          return json(data, 200, { 'X-Request-Id': requestId, ...proxyCors });
+          return json(data, 200, { 'X-Request-Id': requestId });
         } catch (e) {
           const msg = e && e.name === 'AbortError' ? '请求上游超时' : e.message || String(e);
           failures.push(`${ch.name}${tag}: ${msg}`);
-          // 对外只给泛化原因：异常 message 可能包含上游 URL 等内部信息
-          publicFailures.push(
-            `${ch.name}${tag}: ${e && e.name === 'AbortError' ? '上游请求超时' : '上游请求异常'}`
-          );
           // 网络异常 / 首字节超时都是渠道侧失败，计入熔断
           markChannelFailure(env, ctx, ch.name, settings);
           if (attempt < retries) {
@@ -2064,10 +1986,9 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     error: failures.join(' | ').slice(0, 500),
   });
   return err(
-    `所有渠道均失败（${publicFailures.join(' | ').slice(0, 300)}），请携带 X-Request-Id 联系管理员排查`,
+    `所有渠道均失败: ${failures.join(' | ').slice(0, 500)}`,
     502,
-    'upstream_failed',
-    { 'X-Request-Id': requestId, ...proxyCors }
+    'upstream_failed'
   );
 }
 
@@ -2405,9 +2326,7 @@ function checkRpm(auth, settings) {
     rec.rpm == null || rec.rpm === '' ? (settings && settings.rpm_default) | 0 : rec.rpm | 0;
   if (effRpm <= 0) return true;
   const now = Date.now();
-  // 用 key_hash 做分桶 id：哈希迁移后 rec.key 已被删除，若退化为按 name 分桶，
-  // 重名的密钥会共享 RPM 配额。key_hash 唯一且稳定，是最合适的标识。
-  const id = rec.key_hash || rec.key || rec.name || '?';
+  const id = rec.key || rec.name || '?';
   let b = rpmBuckets.get(id);
   if (!b || now - b.winStart >= 60000) {
     b = { winStart: now, count: 0 };
@@ -2798,9 +2717,6 @@ async function handleAdmin(env, ctx, request) {
       );
     }
     const nextSettings = normalizeSettings(body.settings || {});
-    // 与「密钥保存」对齐：恢复的备份可能来自旧版本（含明文 key 字段），
-    // 写入前必须归一化为 { key_hash, key_prefix }，避免明文密钥落盘 R2。
-    await hashKeyRecords(body.keys);
     await Promise.all([
       withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels)),
       withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys)),
@@ -2922,32 +2838,16 @@ export default {
         'r2_missing'
       );
     }
-    // 注意：url/path 必须在 OPTIONS 分支之前声明（修复 v2.2.0 的 TDZ 崩溃：
-    // 之前 path 在分支之后声明，任何 OPTIONS 请求都会抛 ReferenceError，
-    // 导致所有浏览器跨域调用在 CORS 预检阶段失败）
-    const url = new URL(request.url);
-    const path = url.pathname;
-
     if (request.method === 'OPTIONS') {
       // 管理接口不开放跨域：控制台与 /api/admin/* 天然同源，跨域 preflight 一律拒绝
       if (path.startsWith('/api/admin/')) {
         return new Response(null, { status: 403 });
       }
-      // 预检同样尊重 cors_allow_origin：未命中白名单的来源直接 403，
-      // 避免浏览器拿到 204 后再发实际请求（实际请求也会被服务端门控拦截，
-      // 这里是纵深防御，让拒绝发生在更早阶段）
-      const preOrigin = request.headers.get('Origin');
-      let preCfg = '*';
-      try {
-        preCfg = (await loadSettings(env)).cors_allow_origin || '*';
-      } catch {
-        // 设置读失败时回退通配符，不阻塞预检
-      }
-      if (preOrigin && !originAllowed(preCfg, preOrigin)) {
-        return new Response(null, { status: 403 });
-      }
-      return new Response(null, { status: 204, headers: corsHeaders(preCfg, preOrigin) });
+      return new Response(null, { status: 204, headers: CORS });
     }
+
+    const url = new URL(request.url);
+    const path = url.pathname;
 
     // 懒初始化 R2 数据结构（幂等）
     await ensureSeed(env);
@@ -2998,19 +2898,6 @@ export default {
 
     const settings = await loadSettings(env);
 
-    // 服务端 Origin 门控（/v1/*）：cors_allow_origin 为 '*'（默认）时不限；
-    // 配置为具体源时，浏览器跨域请求（带 Origin 头）不在白名单内直接 403。
-    // 非浏览器客户端（curl / SDK）不带 Origin 头，不受影响。
-    const reqOrigin = request.headers.get('Origin');
-    if (reqOrigin && !originAllowed(settings.cors_allow_origin, reqOrigin)) {
-      return err(
-        '该来源不允许跨域调用本网关（请检查网关设置的 cors_allow_origin 白名单）',
-        403,
-        'origin_forbidden'
-      );
-    }
-    const reqCors = corsHeaders(settings.cors_allow_origin, reqOrigin);
-
     if (path === '/v1/models' && request.method === 'GET') {
       const auth = await authApiKey(env, request, settings);
       if (!auth.ok) return auth.res;
@@ -3029,19 +2916,15 @@ export default {
         const allow = auth.record.allowed_models;
         models = models.filter((m) => allow.includes(m));
       }
-      return json(
-        {
-          object: 'list',
-          data: models.sort().map((id) => ({
-            id,
-            object: 'model',
-            created: Math.floor(Date.now() / 1000),
-            owned_by: 'gateway',
-          })),
-        },
-        200,
-        reqCors
-      );
+      return json({
+        object: 'list',
+        data: models.sort().map((id) => ({
+          id,
+          object: 'model',
+          created: Math.floor(Date.now() / 1000),
+          owned_by: 'gateway',
+        })),
+      });
     }
 
     if (
@@ -3076,9 +2959,4 @@ export {
   isChannelOpen,
   filterHealthyCandidates,
   partitionByLongTask,
-  corsHeaders,
-  originAllowed,
-  sha256Hex,
-  hashKeyRecords,
-  checkRpm,
 };

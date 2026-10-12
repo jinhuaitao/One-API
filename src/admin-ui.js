@@ -590,14 +590,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
         <div class="card">
           <div class="card-head">
-            <div><h3>跨域（CORS）</h3><p class="desc">控制哪些网站可以在浏览器里跨域调用 /v1/* 接口</p></div>
-          </div>
-          <div class="grid">
-            <label>允许的来源（cors_allow_origin）<input type="text" id="s_cors_origin" placeholder="*"><span class="hint">`*`（默认）允许任意源；填单个源如 https://app.example.com 则只允许该源；多个源用英文逗号分隔。注意 `*` + Bearer 鉴权意味着拿到 Key 的任意网站都能在浏览器里调用，Key 只给可信前端时建议收紧。非 `*` 时网关还会对 /v1/* 做服务端来源门控（不在白名单的浏览器跨域请求直接 403，非浏览器客户端不受影响）。导出备份再恢复时该设置同样生效。</span></label>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-head">
             <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置的完整快照；恢复会整体覆盖当前配置</p></div>
             <div style="display:flex;gap:8px">
               <button class="soft sm" data-act="backup-export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>立即导出</button>
@@ -1711,7 +1703,6 @@ function renderSettings(){
   $('s_models').value = (s.custom_models || []).join(',');
   $('s_rpm_default').value = s.rpm_default == null ? 0 : s.rpm_default;
   $('s_backup_keep').value = s.backup_keep_days == null ? 7 : s.backup_keep_days;
-  $('s_cors_origin').value = s.cors_allow_origin || '*';
   $('s_tg_token').value = s.tg_bot_token || '';
   $('s_tg_chat').value = s.tg_chat_id || '';
   $('s_tg_down').checked = s.tg_notify_down !== false;
@@ -1778,7 +1769,6 @@ function collectSettings(){
     pricing: pricing,
     rpm_default: Math.max(0, parseInt($('s_rpm_default').value, 10) || 0),
     backup_keep_days: Math.max(0, parseInt($('s_backup_keep').value, 10) || 0),
-    cors_allow_origin: $('s_cors_origin').value.trim() || '*',
     tg_bot_token: $('s_tg_token').value.trim(),
     tg_chat_id: $('s_tg_chat').value.trim(),
     tg_notify_down: $('s_tg_down').checked,
