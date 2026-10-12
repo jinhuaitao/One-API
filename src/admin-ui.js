@@ -424,7 +424,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     </nav>
     <div class="side-foot">
       <div class="side-row">
-        <div class="grow"><b>v2.0.0</b>Cloudflare R2 存储</div>
+        <div class="grow"><b id="appVer">v2.1.0</b>Cloudflare R2 存储<span class="hint" id="appVerNote" style="display:none">（UI 与后端版本不一致，刷新后自动同步）</span></div>
         <button class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
         <button class="icon-btn" data-act="logout" title="退出登录" aria-label="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg></button>
       </div>
@@ -896,7 +896,20 @@ function loadAll(){
 
 /** 鉴权探针：'ok' 有效 / 'bad' 明确无效 / 'unknown' 无法判定（网络故障等） */
 function probeAuth(){
-  return api('/api/admin/ping').then(function(){
+  return api('/api/admin/ping').then(function(v){
+    // 版本号单一真源在后端（src/index.js 的 VERSION，可用 env.APP_VERSION 覆盖）：
+    // 鉴权探针本来就要调 ping，顺带把侧栏版本同步成后端返回值，
+    // 避免 UI 里硬编码的版本与实际部署的 Worker 脱节。
+    try {
+      if (v && v.version) {
+        var el = $('appVer');
+        if (el && el.textContent !== 'v' + v.version) {
+          el.textContent = 'v' + v.version;
+          var note = $('appVerNote');
+          if (note) note.style.display = '';
+        }
+      }
+    } catch (e) {}
     return 'ok';
   }).catch(function(e){
     if(isAuthErr(e) || isKeyMissing(e)) return 'bad';
