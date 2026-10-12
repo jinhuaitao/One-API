@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
@@ -173,14 +173,24 @@ function withLock(name, fn) {
  * 才会有最多一个窗口的延迟，这对本项目的使用方式是可接受的。
  */
 const hotCache = new Map(); // r2 key -> { at, value }
+const hotPending = new Map(); // r2 key -> in-flight Promise：并发 miss 时同 key 只发一次 R2 读（single-flight）
 
 async function cachedJson(env, key, fallback, ttlMs) {
   const now = Date.now();
   const hit = hotCache.get(key);
   if (hit && now - hit.at < (ttlMs || 2000)) return hit.value;
-  const value = await r2GetJson(env, key, fallback);
-  hotCache.set(key, { at: now, value });
-  return value;
+  // single-flight：冷启动瞬间多个并发请求同时 miss 时，只有第一个真正读 R2，
+  // 其余共享同一个 Promise —— 避免缓存击穿把 1 次读放大成 N 次。
+  const pending = hotPending.get(key);
+  if (pending) return pending;
+  const p = (async () => {
+    const value = await r2GetJson(env, key, fallback);
+    hotCache.set(key, { at: Date.now(), value });
+    return value;
+  })();
+  hotPending.set(key, p);
+  p.finally(() => hotPending.delete(key)).catch(() => {});
+  return p;
 }
 
 function invalidateCache(...keys) {
@@ -188,7 +198,7 @@ function invalidateCache(...keys) {
 }
 
 /** 渠道配置的缓存窗口（路由用；变更极少，可以放宽一点） */
-const CHANNELS_TTL_MS = 3000;
+const CHANNELS_TTL_MS = 1000;
 /** 密钥的缓存窗口（鉴权 + 配额，安全相关，取更短的窗口） */
 const KEYS_TTL_MS = 1000;
 
@@ -209,6 +219,14 @@ function defaultSettings() {
      * 因此流式必须单独有这个读超时。
      */
     stream_idle_timeout_ms: 60000,
+    /**
+     * 流式响应的「首字节超时」（毫秒）：收到上游第一个字节之前用这个时长判定
+     * 静默，之后回落到 stream_idle_timeout_ms。长 prompt（几十 KB 上下文）在
+     * 慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，
+     * 用同一个 60s 会把「上游正在算」误判成断流。0 = 与 stream_idle_timeout_ms
+     * 相同（旧行为）。
+     */
+    stream_first_byte_ms: 120000,
     /**
      * 流式响应的「下游保活间隔」（毫秒）：网关超过该时长没有向调用方下发任何字节时，
      * 主动补一条 SSE 注释（`: ka\n\n`）。标准 SSE 客户端会忽略注释行，
@@ -232,6 +250,27 @@ function defaultSettings() {
     default_pricing: { in: 0, out: 0 },
     /** 按模型定价：{ "gpt-4o-mini": { "in": 0.15, "out": 0.6 } } */
     pricing: {},
+    /**
+     * 密钥默认 RPM（每分钟请求数）软上限：0 = 不限。
+     * 未单独设置 rpm 的密钥沿用此值；密钥自己的 rpm 优先（0 = 该 Key 不限）。
+     * 注意：Workers 无共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置值 × 实例数），
+     * 用于防单 Key 打爆上游，不是计费级强配额。
+     */
+    rpm_default: 0,
+    /**
+     * 渠道巡检失败 → Telegram 通知：填 bot token 与 chat_id 后生效。
+     * tg_notify_down：渠道由正常转异常时告警；tg_notify_up：恢复时报告（默认关，避免吵）。
+     * 通知只在巡检（控制台「全部测试」/单渠道测试）发现状态翻转时发送，频率天然受控。
+     */
+    tg_bot_token: '',
+    tg_chat_id: '',
+    tg_notify_down: true,
+    tg_notify_up: false,
+    /**
+     * R2 每日自动备份：每天首个请求把 channels/keys/settings 快照到 backup/<日期>.json，
+     * 保留最近 backup_keep_days 份（超期自动清理）。0 = 关闭自动备份。
+     */
+    backup_keep_days: 7,
   };
 }
 
@@ -253,6 +292,12 @@ function normalizeSettings(raw) {
     600000,
     d.stream_keepalive_ms
   );
+  s.stream_first_byte_ms = clampInt(
+    s.stream_first_byte_ms,
+    0,
+    600000,
+    d.stream_first_byte_ms
+  );
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
   s.timezone_offset_minutes = clampInt(
     s.timezone_offset_minutes,
@@ -263,6 +308,14 @@ function normalizeSettings(raw) {
   s.custom_models = Array.isArray(s.custom_models)
     ? s.custom_models.map((m) => String(m).trim()).filter(Boolean)
     : [];
+  // RPM 软上限与备份保留份数
+  s.rpm_default = clampInt(s.rpm_default, 0, 100000, 0);
+  s.backup_keep_days = clampInt(s.backup_keep_days, 0, 365, 7);
+  // Telegram 通知配置
+  s.tg_bot_token = String(s.tg_bot_token || '').trim();
+  s.tg_chat_id = String(s.tg_chat_id || '').trim();
+  s.tg_notify_down = s.tg_notify_down !== false;
+  s.tg_notify_up = s.tg_notify_up === true;
   const normP = (p) => ({ in: clampNum(p && p.in, 0, 1e6, 0), out: clampNum(p && p.out, 0, 1e6, 0) });
   s.default_pricing = normP(s.default_pricing);
   const pricing = {};
@@ -399,7 +452,7 @@ async function authApiKey(env, request, settings) {
       ),
     };
   }
-  if (env.ADMIN_KEY && token === env.ADMIN_KEY) {
+  if (env.ADMIN_KEY && (await safeEqual(token, env.ADMIN_KEY))) {
     if (settings && settings.allow_admin_key_as_api_key === false) {
       return {
         ok: false,
@@ -410,8 +463,13 @@ async function authApiKey(env, request, settings) {
   }
   // 走短 TTL 缓存：密钥校验是每个 /v1/* 请求的必经步骤，省下这次 R2 往返很值。
   // 控制台保存密钥会主动失效缓存，所以「禁用后立即生效」不受影响。
+  // 匹配按 SHA-256 哈希进行（存储不落明文）；老数据（仍有 key 明文字段）兼容明文匹配，
+  // 命中后由控制台 GET 密钥页时惰性迁移，双格式并存期间不影响鉴权。
   const keys = await cachedJson(env, KEYS_KEY, [], KEYS_TTL_MS);
-  const rec = keys.find((k) => k.key === token);
+  const tokenHash = await sha256Hex(token);
+  const rec = keys.find(
+    (k) => (k.key_hash ? k.key_hash === tokenHash : typeof k.key === 'string' && k.key === token)
+  );
   if (!rec) {
     return { ok: false, res: err('无效的 API Key', 401, 'invalid_key') };
   }
@@ -431,7 +489,43 @@ async function authApiKey(env, request, settings) {
 }
 
 /** 管理后台鉴权（/api/admin/*） */
-function requireAdmin(env, request) {
+/** 恒定时间字符串比较：先把两侧都 SHA-256 归一到 32 字节定长，再逐字节异或。
+ *  直接 === 的耗时随匹配前缀长度变化，管理接口公网可达，值得防时序侧信道。 */
+async function safeEqual(a, b) {
+  const enc = new TextEncoder();
+  const [x, y] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(String(a))),
+    crypto.subtle.digest('SHA-256', enc.encode(String(b))),
+  ]);
+  const ua = new Uint8Array(x);
+  const ub = new Uint8Array(y);
+  let diff = 0;
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
+  return diff === 0;
+}
+
+/** SHA-256 → 小写 hex。网关密钥只存哈希不存明文：R2 桶泄露时密钥不跟着裸奔。 */
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
+  return Array.prototype.map
+    .call(new Uint8Array(buf), (b) => ('0' + b.toString(16)).slice(-2))
+    .join('');
+}
+
+/** 把含明文 key 的条目归一化为 { key_hash, key_prefix }（幂等，原数组就地修改）。
+ *  触发点：控制台保存密钥（整包提交）、打开控制台密钥页（GET 惰性迁移老数据）。 */
+async function hashKeyRecords(list) {
+  for (const k of list || []) {
+    if (k && typeof k.key === 'string' && k.key) {
+      k.key_hash = await sha256Hex(k.key);
+      k.key_prefix = String(k.key).slice(0, 12);
+      delete k.key;
+    }
+  }
+  return list || [];
+}
+
+async function requireAdmin(env, request) {
   const url = new URL(request.url);
   const key =
     request.headers.get('X-Admin-Key') || url.searchParams.get('admin_key');
@@ -445,7 +539,7 @@ function requireAdmin(env, request) {
       ),
     };
   }
-  if (key !== env.ADMIN_KEY) {
+  if (!key || !(await safeEqual(key, env.ADMIN_KEY))) {
     return { ok: false, res: err('Admin Key 不正确', 401, 'unauthorized') };
   }
   return { ok: true };
@@ -748,7 +842,8 @@ function anthropicStreamToOpenAI(
   model,
   onFinish = () => {},
   idleMs = 0,
-  keepaliveMs = 0
+  keepaliveMs = 0,
+  firstByteMs = 0
 ) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -761,6 +856,10 @@ function anthropicStreamToOpenAI(
   let usageSettled = false;
   const toolIndexByBlock = {};
   let toolCounter = 0;
+  // 「上游→网关」方向的活动时间戳：Anthropic 兼容渠道里 content_block_stop、
+  // 未知事件等块会被解析层静默丢弃、不向下游写出，但连接实际是活的。
+  // guardSSEStream 借它区分「上游在说话」与「上游真的断了」。
+  const activityRef = { lastUpstreamAt: Date.now() };
 
   const settleUsage = (u, finish, meta) => {
     if (usageSettled) return;
@@ -841,6 +940,7 @@ function anthropicStreamToOpenAI(
 
   const transform = new TransformStream({
     transform(bytes, controller) {
+      activityRef.lastUpstreamAt = Date.now();
       buffer += decoder.decode(bytes, { stream: true });
       // 容忍 CRLF：部分 Anthropic 兼容中转（套一层的网关）会输出 \r\n，
       // 只按 \n\n 切分会永远拼不出一个完整事件，表现为「流式翻译零输出」。
@@ -887,6 +987,8 @@ function anthropicStreamToOpenAI(
     onFinish: (reason, meta) => settleUsage(null, reason, meta),
     idleMs,
     keepaliveMs,
+    firstByteMs,
+    activityRef,
   });
 }
 
@@ -951,7 +1053,13 @@ const isDoneBlock = (raw) => /^\s*data:\s*\[DONE\]\s*$/m.test(raw);
  *  - 诊断信息（onFinish 第二个参数）：{ bytes, first_byte }——已向调用方转发的字节数、
  *    是否收到过上游首块，用于区分「上游从没吐过字」和「吐到一半停了」。
  */
-function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
+function guardSSEStream(src, {
+  onFinish,
+  idleMs = 0,
+  keepaliveMs = 0,
+  firstByteMs = 0,
+  activityRef = null
+} = {}) {
   const encoder = new TextEncoder();
   let reader = null;
   let idleTimer = null;
@@ -962,13 +1070,8 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
   let bytesOut = 0;
   let gotFirst = false;
   let lastOutAt = 0;
+  let nextKaAt = 0; // 下次应发保活注释的绝对时刻；写入路径只更新它，不重排定时器
   let controllerRef = null; // start() 里赋值，供保活定时器向下游写注释用
-  // 保活定时器的检查周期：约 keepaliveMs / 4，并夹在 [50ms, keepaliveMs] 之间。
-  // 上界保证注释下发时刻不会比配置的间隔更晚；下界避免极小配置把 isolate 唤醒成空转。
-  const KA_TICK =
-    keepaliveMs > 0
-      ? Math.min(Math.max(50, Math.floor(keepaliveMs / 4)), Math.max(50, keepaliveMs))
-      : 0;
 
   const meta = () => ({ bytes: bytesOut, first_byte: gotFirst });
 
@@ -991,7 +1094,7 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
 
   const clearKa = () => {
     if (kaTimer) {
-      clearInterval(kaTimer);
+      clearTimeout(kaTimer);
       kaTimer = null;
     }
   };
@@ -1017,40 +1120,51 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
     );
   };
 
-  /** 武装下游保活：常驻定时器 + 时间戳比较。
+  /** 武装下游保活：自调度 setTimeout 链 + 「下次应发时刻」对齐。
    *
-   *  原实现每向调用方写一个 chunk 都要 clearInterval + setInterval，
-   *  一次长回答上千个 chunk 就是上千次定时器创建 / 销毁 —— 这些开销都记在
-   *  Workers 的 CPU 时间里，而免费版只有 10ms。改成常驻定时器后，写路径
-   *  只更新一个时间戳，定时器数量恒定为 1，对外语义（超过 keepaliveMs
-   *  没下发任何字节就补一条 SSE 注释）完全不变。 */
+   *  v1 每写一个 chunk 都 clearInterval + setInterval（一次长回答上千次定时器
+   *  创建/销毁，吃免费版 10ms CPU 限额）；v2 改常驻 setInterval 后开销恒定，
+   *  但检查周期（keepaliveMs/4）的相位会把实际注释间隔放大到
+   *  ⌈keepaliveMs / tick⌉ × tick，非 4 的倍数配置最坏漂移 +25%。
+   *  现在：醒来时刻直接对齐 nextKaAt —— 写入路径只更新时间戳（不重排），
+   *  定时器醒来若未到点就按剩余时间重排；注释间隔与配置严格一致，
+   *  定时器数量仍恒定为 1，写路径零额外开销。 */
   const armKa = () => {
     if (!keepaliveMs || kaTimer || closed) return;
     lastOutAt = Date.now();
-    kaTimer = setInterval(() => {
+    nextKaAt = lastOutAt + keepaliveMs;
+    const stepKa = () => {
       if (closed) {
         clearKa();
         return;
       }
-      if (Date.now() - lastOutAt < keepaliveMs) return;
-      try {
-        controllerRef.enqueue(encoder.encode(': ka\n\n'));
-        bytesOut += 6;
-        lastOutAt = Date.now();
-      } catch {
-        closed = true;
-        clearKa();
+      const now = Date.now();
+      if (now >= nextKaAt) {
+        try {
+          controllerRef.enqueue(encoder.encode(': ka\n\n'));
+          bytesOut += 6;
+          lastOutAt = now;
+        } catch {
+          closed = true;
+          clearKa();
+          return;
+        }
       }
-    }, KA_TICK);
+      nextKaAt = lastOutAt + keepaliveMs;
+      kaTimer = setTimeout(stepKa, Math.max(1, nextKaAt - Date.now()));
+    };
+    kaTimer = setTimeout(stepKa, Math.max(1, nextKaAt - Date.now()));
   };
 
-  /** 向调用方下发字节的统一入口：统计字节数并刷新「最后下发时刻」，供保活定时器判断 */
+  /** 向调用方下发字节的统一入口：统计字节数并刷新「最后下发时刻」，
+   *  供保活定时器判断（同时顺延下次应发时刻，避免数据流正常时误发注释） */
   const out = (controller, bytes) => {
     if (closed) return;
     try {
       controller.enqueue(bytes);
       bytesOut += bytes.byteLength;
       lastOutAt = Date.now();
+      if (keepaliveMs) nextKaAt = lastOutAt + keepaliveMs;
     } catch {
       closed = true;
       clearKa();
@@ -1064,7 +1178,21 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
       const arm = () => {
         if (!idleMs) return;
         clearIdle();
+        // 首字节与中途静默分离：长 prompt / 慢渠道出首 token 前的排队 + 推理
+        // 远比流中途的停顿更久，统一用 idleMs 会把「上游正在算」误判成断流。
+        const wait = gotFirst ? idleMs : (firstByteMs || idleMs);
         idleTimer = setTimeout(() => {
+          // 结构性防误判：解析层（rewriteOpenAISSE / anthropicStreamToOpenAI）
+          // 可能静默丢弃非数据块（未知事件、注释行）而不向下游写出任何字节，
+          // 但「上游→网关」方向最近仍有字节到达 —— 上游活着，继续等而不是掐。
+          if (
+            activityRef &&
+            activityRef.lastUpstreamAt &&
+            Date.now() - activityRef.lastUpstreamAt < wait
+          ) {
+            arm();
+            return;
+          }
           timedOut = true;
           // 主动断开上游：挂起的 read() 会以 done 结束，随后走超时收尾
           try {
@@ -1072,7 +1200,7 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
           } catch {
             // 忽略
           }
-        }, idleMs);
+        }, wait);
       };
 
       try {
@@ -1137,7 +1265,8 @@ function rewriteOpenAISSE(
   model,
   onFinish = () => {},
   idleMs = 0,
-  keepaliveMs = 0
+  keepaliveMs = 0,
+  firstByteMs = 0
 ) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -1145,6 +1274,10 @@ function rewriteOpenAISSE(
   let usage = null;
   let settled = false;
   let sawDone = false;
+  // 「上游→网关」方向的活动时间戳：只要上游还有字节进来（哪怕最终被解析层
+  // 丢弃），就说明连接活着。guardSSEStream 借它避免把「解析层丢弃非数据块」
+  // 误判成上游断流。
+  const activityRef = { lastUpstreamAt: Date.now() };
 
   const done = (finish, meta) => {
     if (settled) return;
@@ -1161,6 +1294,7 @@ function rewriteOpenAISSE(
 
   const transform = new TransformStream({
     transform(bytes, controller) {
+      activityRef.lastUpstreamAt = Date.now();
       buffer += decoder.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n');
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
@@ -1187,6 +1321,8 @@ function rewriteOpenAISSE(
     onFinish: done,
     idleMs,
     keepaliveMs,
+    firstByteMs,
+    activityRef,
   });
 }
 
@@ -1401,7 +1537,11 @@ async function bumpKeyUsage(env, auth, tokens, cost) {
   try {
     await withLock(KEYS_KEY, async () => {
       const keys = await r2GetJson(env, KEYS_KEY, []);
-      const rec = keys.find((k) => k.key === auth.record.key);
+      const rec = keys.find(
+        (k) =>
+          (auth.record.key_hash && k.key_hash === auth.record.key_hash) ||
+          (auth.record.key && k.key === auth.record.key)
+      );
       if (rec) {
         rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
         rec.requests = (rec.requests || 0) + 1;
@@ -1468,6 +1608,25 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     return err('请求体必须是合法 JSON', 400, 'invalid_json');
   }
   if (!body.model) return err('缺少 model 参数', 400, 'missing_model');
+
+  // 密钥 RPM 软限流（isolate 级，防单 Key 打爆上游；强配额走 quota_tokens）
+  if (!checkRpm(auth, settings)) {
+    recordRequest(env, ctx, {
+      auth,
+      settings,
+      request_id: reqId(),
+      model: body.model,
+      channel: null,
+      ok: false,
+      ms: 0,
+      error: 'rate_limited',
+    });
+    return err(
+      '该 Key 已达到每分钟请求数（RPM）上限，请稍后再试',
+      429,
+      'rate_limited'
+    );
+  }
 
   // 密钥级模型白名单
   if (!auth.admin && auth.record) {
@@ -1562,14 +1721,16 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                   body.model,
                   onFinish,
                   settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms
+                  settings.stream_keepalive_ms,
+                  settings.stream_first_byte_ms
                 )
               : rewriteOpenAISSE(
                   upstream.body,
                   body.model,
                   onFinish,
                   settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms
+                  settings.stream_keepalive_ms,
+                  settings.stream_first_byte_ms
                 );
             ctx.waitUntil(
               finishPromise
@@ -1707,7 +1868,9 @@ function matchLog(l, f) {
 
 /** 列出某天的日志（倒序）。R2 list 天然按倒序时间戳返回，因此游标翻页即「更旧的一页」 */
 async function listLogs(env, date, opts) {
-  const limit = clampInt(opts.limit, 1, 500, 50);
+  // limit 上限 40：list 1 次 + 逐条 get 40 次 = 41 次 subrequest，加鉴权/设置读取
+  // 仍须落在免费版「单请求 50 次 subrequest」硬顶之内（旧上限 500 必炸）。
+  const limit = clampInt(opts.limit, 1, 40, 40);
   const prefix = `${LOG_PREFIX}${date}/`;
   const listed = await env.R2.list({
     prefix,
@@ -1759,7 +1922,10 @@ function toSortedList(map, limit) {
 
 /** 聚合最近 N 天的统计 */
 async function loadStats(env, days, settings) {
-  const n = clampInt(days, 1, 90, 14);
+  // 上限 22：当期 + 环比两次窗口 = 44 次 R2 读，必须落在 Cloudflare Workers
+  // 免费版「单请求 50 次 subrequest」硬顶之内（90 天 = 180 读必炸，30 天 = 60 读也炸）。
+  // 想看更长趋势请依赖每日自动备份里的 backup/<日期>.json 快照。
+  const n = clampInt(days, 1, 22, 14);
   const offset = settings && settings.timezone_offset_minutes;
   const dates = [];
   const base = Date.now();
@@ -1886,7 +2052,7 @@ async function deletePrefix(env, prefix) {
   let deleted = 0;
   let cursor;
   do {
-    const listed = await env.R2.list({ prefix, limit: 200, cursor });
+    const listed = await env.R2.list({ prefix, limit: 1000, cursor });
     const keys = listed.objects.map((o) => o.key);
     if (keys.length) {
       // R2 的 delete 支持直接传数组（单次上限 1000），
@@ -1973,16 +2139,173 @@ async function testChannel(env, ch, settings) {
 }
 
 /** 记录渠道健康状态到渠道配置（best-effort，与后台编辑共用同一把锁避免互相覆盖） */
-async function saveChannelHealth(env, channelId, health) {
+/* ---------------- 密钥 RPM 软限流（isolate 内存固定窗口） ---------------- */
+
+const rpmBuckets = new Map(); // key 标识 -> { winStart, count }
+
+/**
+ * 密钥 RPM（每分钟请求数）检查：固定 60s 窗口计数。
+ * - 密钥自己的 rpm 字段优先；未设置（null/undefined）时用 settings.rpm_default；0 = 不限。
+ * - Workers 无跨实例共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置 × 实例数），
+ *   用于「防单 Key 瞬时打爆上游」；计费级强配额请看 quota_tokens（走 R2 精确累加）。
+ * - 计数在进入代理主流程时 +1（鉴权通过后才检查），被 429 的请求不计入下一窗口。
+ */
+function checkRpm(auth, settings) {
+  if (!auth || auth.admin) return true; // ADMIN_KEY 直调不参与限流
+  const rec = auth.record;
+  if (!rec) return true;
+  const effRpm =
+    rec.rpm == null || rec.rpm === '' ? (settings && settings.rpm_default) | 0 : rec.rpm | 0;
+  if (effRpm <= 0) return true;
+  const now = Date.now();
+  const id = rec.key || rec.name || '?';
+  let b = rpmBuckets.get(id);
+  if (!b || now - b.winStart >= 60000) {
+    b = { winStart: now, count: 0 };
+    rpmBuckets.set(id, b);
+  }
+  b.count++;
+  if (rpmBuckets.size > 10000) {
+    // LRU 淘汰最旧的一半，而不是整表 clear()——整表清零等于给所有 Key
+    // （包括正在被滥用的）同时发一枚「免限流窗口」，也误伤正常用户
+    const stale = Array.from(rpmBuckets.entries())
+      .sort((a, b2) => a[1].winStart - b2[1].winStart)
+      .slice(0, Math.ceil(rpmBuckets.size / 2));
+    for (const [sid] of stale) rpmBuckets.delete(sid);
+  }
+  return b.count <= effRpm;
+}
+
+/* ---------------- Telegram 通知 ---------------- */
+
+/** Telegram Bot 消息：返回 { ok, detail }，失败不抛异常（通知失败不影响主流程），8s 超时防挂起 */
+async function sendTelegram(settings, text) {
+  const token = settings && settings.tg_bot_token;
+  const chatId = settings && settings.tg_chat_id;
+  if (!token || !chatId) {
+    return { ok: false, detail: '未配置 Bot Token 或 Chat ID' };
+  }
   try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        disable_web_page_preview: true,
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (res.ok) return { ok: true, detail: '' };
+    // 透传 Telegram 的错误描述，并附上最常见的两条人工排查提示
+    let detail = `HTTP ${res.status}`;
+    try {
+      const d = await res.json();
+      if (d && d.description) detail += `：${d.description}`;
+    } catch {
+      // 忽略解析失败
+    }
+    if (res.status === 401) detail += '（Bot Token 无效）';
+    else if (res.status === 400 && /chat not found/i.test(detail)) {
+      detail += '（Chat ID 不正确，或还没有向该 Bot 发送过任何消息）';
+    }
+    return { ok: false, detail };
+  } catch (e) {
+    const msg =
+      e && e.name === 'AbortError'
+        ? '请求超时（8s）—— 当前网络无法到达 api.telegram.org'
+        : '网络请求失败：' + ((e && e.message) || '未知错误');
+    return { ok: false, detail: msg };
+  }
+}
+
+/* ---------------- R2 每日自动备份 ---------------- */
+
+let lastBackupDate = ''; // isolate 级去重：每天最多触发一次快照
+
+/**
+ * 每日惰性备份：每天首个请求把 channels/keys/settings 快照到 backup/<日期>.json，
+ * 保留最近 backup_keep_days 份（0 = 关闭）。无 cron 依赖；失败完全静默。
+ * 恢复入口：管理端 /api/admin/restore（控制台「备份与恢复」）。
+ */
+async function maybeAutoBackup(env, ctx, settings) {
+  try {
+    const keep = (settings && settings.backup_keep_days) | 0;
+    if (keep <= 0) return;
+    const today = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
+    if (today === lastBackupDate) return;
+    lastBackupDate = today; // 先记日期再备份：备份失败明天重试，避免每个请求都重试
+    const [channels, keys, settingsSnap] = await Promise.all([
+      r2GetJson(env, CHANNELS_KEY, []),
+      r2GetJson(env, KEYS_KEY, []),
+      r2GetJson(env, SETTINGS_KEY, {}),
+    ]);
+    const snap = {
+      type: 'oneapi-gateway-backup',
+      version: 1,
+      created_at: nowIso(),
+      channels,
+      keys,
+      settings: settingsSnap,
+    };
+    await r2PutJson(env, `backup/${today}.json`, snap);
+    // 清理超期份数（YYYY-MM-DD 字典序即时间序）
+    const listed = await env.R2.list({ prefix: 'backup/', limit: 1000 });
+    const old = listed.objects
+      .map((o) => o.key)
+      .filter((k) => k !== `backup/${today}.json`)
+      .sort();
+    const overflow = old.length - (keep - 1);
+    if (overflow > 0) {
+      const toDelete = old.slice(0, overflow);
+      try {
+        await env.R2.delete(toDelete);
+      } catch {
+        for (const k of toDelete) {
+          try {
+            await env.R2.delete(k);
+          } catch {
+            // 忽略单个失败
+          }
+        }
+      }
+    }
+  } catch {
+    // 备份失败不影响主流程
+  }
+}
+
+async function saveChannelHealth(env, channelId, health, { settings, ctx } = {}) {
+  try {
+    let notifyText = null;
     await withLock(CHANNELS_KEY, async () => {
       const channels = await r2GetJson(env, CHANNELS_KEY, []);
       const idx = channels.findIndex((c) => c.id === channelId);
       if (idx < 0) return;
+      const prev = channels[idx].health;
       channels[idx].health = { ...health, checked_at: nowIso() };
       await r2PutJson(env, CHANNELS_KEY, channels);
       invalidateCache(CHANNELS_KEY);
+      // 渠道状态翻转 → Telegram 通知（只在巡检触发，频率天然受控；
+      // 首次巡检没有旧状态，不打扰）
+      if (settings && (settings.tg_notify_down || settings.tg_notify_up) && prev) {
+        const wasOk = prev.ok !== false;
+        const isOk = health.ok !== false;
+        if (wasOk !== isOk) {
+          const name = channels[idx].name || channelId;
+          notifyText = isOk
+            ? `✅ [One-API] 渠道「${name}」已恢复\n状态：正常 · 延迟 ${health.ms || 0}ms\n时间：${nowIso()}`
+            : `🚨 [One-API] 渠道「${name}」巡检失败\n状态：异常 · ${String(health.message || '未知错误').slice(0, 180)}\n时间：${nowIso()}`;
+        }
+      }
     });
+    if (notifyText) {
+      const p = sendTelegram(settings, notifyText);
+      if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+    }
   } catch {
     // 忽略
   }
@@ -1993,7 +2316,7 @@ async function saveChannelHealth(env, channelId, health) {
 async function handleAdmin(env, ctx, request) {
   const url = new URL(request.url);
   const path = url.pathname;
-  const gate = requireAdmin(env, request);
+  const gate = await requireAdmin(env, request);
   if (!gate.ok) return gate.res;
 
   /* ---- 鉴权探针 ----
@@ -2035,13 +2358,31 @@ async function handleAdmin(env, ctx, request) {
 
   /* ---- 密钥 ---- */
   if (path === '/api/admin/keys' && request.method === 'GET') {
-    return json(await r2GetJson(env, KEYS_KEY, []));
+    const keys = await r2GetJson(env, KEYS_KEY, []);
+    // 惰性迁移：老数据（明文 key）在打开控制台时转哈希并写回，之后响应里不再出现明文
+    let mutated = false;
+    for (const k of keys) {
+      if (typeof k.key === 'string' && k.key) {
+        k.key_hash = await sha256Hex(k.key);
+        k.key_prefix = String(k.key).slice(0, 12);
+        delete k.key;
+        mutated = true;
+      }
+    }
+    if (mutated) {
+      ctx.waitUntil(
+        withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, keys)).then(() => invalidateCache(KEYS_KEY))
+      );
+    }
+    return json(keys);
   }
   if (path === '/api/admin/keys' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     if (!body || !Array.isArray(body.keys)) {
       return err('请求体应为 {keys: [...]}', 400, 'invalid_body');
     }
+    // 归一化：前端提交的新密钥明文就地转 { key_hash, key_prefix }，R2 永不落明文
+    await hashKeyRecords(body.keys);
     // 与用量累加共用一把锁，避免编辑被并发请求的用量写回覆盖
     await withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys));
     invalidateCache(KEYS_KEY); // 禁用 / 改配额后立即生效，不等待 TTL
@@ -2066,7 +2407,7 @@ async function handleAdmin(env, ctx, request) {
       url.searchParams.get('date') || dateStr(Date.now(), settings.timezone_offset_minutes);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return err('日期格式应为 YYYY-MM-DD', 400, 'bad_date');
     const out = await listLogs(env, date, {
-      limit: url.searchParams.get('limit') || 50,
+      limit: url.searchParams.get('limit') || 40,
       cursor: url.searchParams.get('cursor') || undefined,
       ok: url.searchParams.get('ok') || '',
       stream: url.searchParams.get('stream') || '',
@@ -2121,6 +2462,111 @@ async function handleAdmin(env, ctx, request) {
   }
 
   /* ---- 测试 ---- */
+  /* ---- Telegram 通知测试 ---- */
+  // 用当前（或表单里尚未保存的）配置发一条测试消息，立即验证连通性
+  if (path === '/api/admin/test-notify' && request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const s = { ...settings };
+    // 表单里刚填、还没点「保存设置」的配置优先 —— 填完即可测，不用先保存
+    if (body && typeof body.tg_bot_token === 'string' && body.tg_bot_token.trim()) {
+      s.tg_bot_token = body.tg_bot_token.trim();
+    }
+    if (body && typeof body.tg_chat_id === 'string' && body.tg_chat_id.trim()) {
+      s.tg_chat_id = body.tg_chat_id.trim();
+    }
+    const r = await sendTelegram(
+      s,
+      `✅ [One-API] 测试通知\n配置连通成功 · ${nowIso()}`
+    );
+    // 无论成败都返回 200，由前端按 ok 分支展示诊断信息
+    return json({ ok: r.ok, detail: r.detail || '' });
+  }
+
+  /* ---- 备份与恢复 ---- */
+  // 当场生成完整快照下载（channels + keys + settings，含时间戳）
+  if (path === '/api/admin/backup' && request.method === 'GET') {
+    const [ch, ks, st] = await Promise.all([
+      r2GetJson(env, CHANNELS_KEY, []),
+      r2GetJson(env, KEYS_KEY, []),
+      r2GetJson(env, SETTINGS_KEY, {}),
+    ]);
+    const snap = {
+      type: 'oneapi-gateway-backup',
+      version: 1,
+      created_at: nowIso(),
+      channels: ch,
+      keys: ks,
+      settings: st,
+    };
+    return new Response(JSON.stringify(snap, null, 2), {
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': `attachment; filename="oneapi-backup-${dateStr(Date.now(), settings.timezone_offset_minutes)}.json"`,
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+  // 列出每日自动备份（backup/<日期>.json）；?date=YYYY-MM-DD 直接下载某份
+  if (path === '/api/admin/backups' && request.method === 'GET') {
+    const wantDate = url.searchParams.get('date');
+    if (wantDate && /^\d{4}-\d{2}-\d{2}$/.test(wantDate)) {
+      const snap = await r2GetJson(env, `backup/${wantDate}.json`, null);
+      if (!snap) return err('该日期没有自动备份', 404, 'not_found');
+      return new Response(JSON.stringify(snap, null, 2), {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="oneapi-backup-${wantDate}.json"`,
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+    const listed = await env.R2.list({ prefix: 'backup/', limit: 1000 });
+    const backups = listed.objects
+      .map((o) => ({ date: o.key.slice(7, 17), size: o.size, uploaded: o.uploaded }))
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    return json({ backups, keep_days: settings.backup_keep_days });
+  }
+  // 恢复：整体覆盖 channels/keys/settings（危险操作，需 confirm: true）
+  if (path === '/api/admin/restore' && request.method === 'POST') {
+    const body = await request.json().catch(() => null);
+    if (
+      !body ||
+      body.type !== 'oneapi-gateway-backup' ||
+      !Array.isArray(body.channels) ||
+      !Array.isArray(body.keys)
+    ) {
+      return err(
+        '备份文件格式不正确（需要「立即导出」生成的 oneapi-gateway-backup 完整快照）',
+        400,
+        'invalid_backup'
+      );
+    }
+    if (body.confirm !== true) {
+      return err(
+        '恢复会整体覆盖当前渠道/密钥/设置，请带上 confirm: true（控制台会先弹确认）',
+        400,
+        'confirm_required'
+      );
+    }
+    const nextSettings = normalizeSettings(body.settings || {});
+    await Promise.all([
+      withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels)),
+      withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys)),
+      (async () => {
+        await r2PutJson(env, SETTINGS_KEY, nextSettings);
+        invalidateSettingsCache();
+      })(),
+    ]);
+    invalidateCache(CHANNELS_KEY);
+    invalidateCache(KEYS_KEY);
+    return json({
+      ok: true,
+      channels: body.channels.length,
+      keys: body.keys.length,
+      restored_at: nowIso(),
+    });
+  }
+
   if (path === '/api/admin/test-channel' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     const channels = await r2GetJson(env, CHANNELS_KEY, []);
@@ -2134,7 +2580,7 @@ async function handleAdmin(env, ctx, request) {
           ok: !!r.ok,
           ms: firstOk ? firstOk.ms : ((r.keys || [])[0] || {}).ms || 0,
           message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || '测试失败').slice(0, 200),
-        })
+        }, { settings, ctx })
       );
     }
     return json(r);
@@ -2155,7 +2601,7 @@ async function handleAdmin(env, ctx, request) {
         message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || r.error || '测试失败').slice(0, 200),
       };
       results.push({ id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error });
-      await saveChannelHealth(env, ch.id, health);
+      await saveChannelHealth(env, ch.id, health, { settings, ctx });
     }
     return json({ ok: results.some((r) => r.ok), results });
   }
@@ -2225,6 +2671,10 @@ export default {
       );
     }
     if (request.method === 'OPTIONS') {
+      // 管理接口不开放跨域：控制台与 /api/admin/* 天然同源，跨域 preflight 一律拒绝
+      if (path.startsWith('/api/admin/')) {
+        return new Response(null, { status: 403 });
+      }
       return new Response(null, { status: 204, headers: CORS });
     }
 
@@ -2234,10 +2684,19 @@ export default {
     // 懒初始化 R2 数据结构（幂等）
     await ensureSeed(env);
 
+    // 版本号优先取 wrangler.toml [vars] 的 APP_VERSION（部署时与 package.json 同步维护），回退源码常量
+    const version = env.APP_VERSION || VERSION;
+
+    // 每日惰性备份：每天首个请求触发一次快照（异步，不阻塞请求；失败完全静默）
+    if (path !== '/healthz' && path !== '/health') {
+      const bootSettings = await loadSettings(env);
+      ctx.waitUntil(maybeAutoBackup(env, ctx, bootSettings));
+    }
+
     if (path === '/' && request.method === 'GET') {
       return json({
         name: 'oneapi-gateway',
-        version: VERSION,
+        version,
         r2: 'bound',
         admin: '/admin',
         endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/v1/embeddings'],
@@ -2245,7 +2704,7 @@ export default {
     }
 
     if ((path === '/healthz' || path === '/health') && request.method === 'GET') {
-      return json({ status: 'ok', version: VERSION, time: nowIso() });
+      return json({ status: 'ok', version, time: nowIso() });
     }
 
     if (path === '/admin' && request.method === 'GET') {
@@ -2255,7 +2714,18 @@ export default {
     }
 
     if (path.startsWith('/api/admin/')) {
-      return handleAdmin(env, ctx, request);
+      const res = await handleAdmin(env, ctx, request);
+      // 安全收紧：管理接口响应不携带 CORS 头 —— 控制台与 API 同源，跨域（含恶意网页）
+      // 即使拿到 Admin Key 也不应能直接带着 X-Admin-Key 调用管理接口
+      const h = new Headers(res.headers);
+      h.delete('Access-Control-Allow-Origin');
+      h.delete('Access-Control-Allow-Headers');
+      h.delete('Access-Control-Allow-Methods');
+      return new Response(res.body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: h,
+      });
     }
 
     const settings = await loadSettings(env);

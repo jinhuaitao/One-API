@@ -251,6 +251,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .phead{display:flex;gap:8px;font-size:11.5px;color:var(--muted);padding:0 0 7px;text-transform:uppercase;letter-spacing:.05em}
   .phead span{flex:1}
   .phead span:last-child{flex:0 0 34px;width:34px}
+  .bhead,.brow{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px}
+  .bhead{border-bottom:1px solid var(--border);color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;padding-top:0}
+  .bhead span:first-child,.brow span:first-child{flex:0 0 110px;font-family:var(--mono)}
+  .bhead span:nth-child(2),.brow span:nth-child(2){flex:1}
+  .mini-link{color:var(--accent);cursor:pointer;text-decoration:none}
+  .mini-link:hover{text-decoration:underline}
 
   /* ============================================================
      开关
@@ -441,7 +447,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="seg" id="rangeSeg">
             <button class="segbtn" data-range="7">7 天</button>
             <button class="segbtn on" data-range="14">14 天</button>
-            <button class="segbtn" data-range="30">30 天</button>
+            <button class="segbtn" data-range="21">21 天</button>
           </div>
           <div class="spacer"></div>
           <button class="ghost sm" data-act="refresh-stats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>刷新</button>
@@ -538,7 +544,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="card-head"><div><h3>性能与容错</h3><p class="desc">作用于所有渠道的默认值，单个渠道可单独覆盖超时</p></div></div>
           <div class="grid">
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
-            <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：上游超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
+            <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：收到上游第一个字节之后，超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
+            <label>流式首字节超时（毫秒）<input type="number" id="s_firstbyte" min="0" max="600000" step="1000"><span class="hint">收到上游第一个字节之前的专用等待：长 prompt（几十 KB 上下文）在慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，统一用「流式静默超时」会把「上游正在算」误判成断流（客户端看到「上游超过静默超时未返回数据」）。0 = 与「流式静默超时」相同，默认 120000。</span></label>
             <label>下游保活间隔（毫秒）<input type="number" id="s_stream_ka" min="0" max="600000" step="1000"><span class="hint">网关超过该时长没向调用方下发任何字节时，主动补一条 SSE 注释（": ka"，客户端会忽略），防止模型长思考 / 上游排队期间的「零字节窗口」被中间的 nginx / CDN / 客户端读超时掐断。与「流式静默超时」互补：一个管上游→网关，一个管网关→调用方。0 = 关闭，默认 15000。</span></label>
             <label>瞬时错误重试次数（429 / 5xx / 网络异常）<input type="number" id="s_retries" min="0" max="5" step="1"></label>
           </div>
@@ -556,6 +563,38 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <label>时区偏移（分钟，480 = UTC+8）<input type="number" id="s_tz" min="-720" max="840" step="30"><span class="hint">决定日志与统计按哪个「当地日期」归档；若控制台查不到刚产生的日志，多半是这里与本地时区不一致。</span></label>
             <label>额外对外暴露的模型（逗号分隔，仅用于 /v1/models 展示）<input type="text" id="s_models" placeholder="my-alias,gpt-4o"></label>
           </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div><h3>限流 · 通知 · 备份</h3><p class="desc">密钥 RPM 软限流、Telegram 渠道告警、每日自动备份</p></div>
+          </div>
+          <div class="grid">
+            <label>默认 RPM（每密钥每分钟请求数，0 = 不限）<input type="number" id="s_rpm_default" min="0" max="100000" step="1"><span class="hint">未单独设置 RPM 的密钥沿用此值。Workers 多实例下为软限制（实际上限 ≈ 配置 × 实例数），用于防单 Key 打爆上游；计费级强配额请用密钥的 Token 配额。</span></label>
+            <label>每日自动备份保留份数<input type="number" id="s_backup_keep" min="0" max="365" step="1"><span class="hint">每天首个请求把渠道 / 密钥 / 设置快照到 backup/<日期>.json，超期自动清理。0 = 关闭自动备份。</span></label>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <label>Telegram Bot Token<input type="password" id="s_tg_token" placeholder="123456:ABC-DEF..." autocomplete="off"><span class="hint">找 @BotFather 创建 Bot 获取；留空则不通知。</span></label>
+            <label>Telegram Chat ID<input type="text" id="s_tg_chat" placeholder="接收通知的 chat_id（可向 @userinfobot 发消息查询）"></label>
+          </div>
+          <div class="grid" style="margin-top:10px">
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_tg_down"> 渠道由正常转异常时告警（推荐）</label>
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_tg_up"> 渠道恢复时通知（默认关，避免吵）</label>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="soft sm" data-act="test-notify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>发送测试消息</button>
+            <span class="muted" style="font-size:12px">填完 Token 与 Chat ID 即可测试（无需先保存）；渠道告警只在巡检发现状态翻转时发送</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置的完整快照；恢复会整体覆盖当前配置</p></div>
+            <div style="display:flex;gap:8px">
+              <button class="soft sm" data-act="backup-export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>立即导出</button>
+              <button class="ghost sm" data-act="backup-restore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>从文件恢复</button>
+            </div>
+          </div>
+          <div id="backupList" class="muted" style="font-size:12.5px">加载中…</div>
+          <input type="file" id="restoreFile" accept="application/json,.json" style="display:none">
         </div>
         <div class="card">
           <div class="card-head">
@@ -778,16 +817,26 @@ function confirmDlg(title, text){
 }
 
 /* ---------- 主题 ---------- */
-function applyTheme(t){
+function applyTheme(t, persist){
   document.documentElement.setAttribute('data-theme', t);
-  store.set('og_theme', t);
+  // persist=false：系统偏好联动时只切换不落盘 —— 用户手动选择才成为「固定偏好」
+  if(persist !== false) store.set('og_theme', t);
   var b = $('btnTheme');
   if(b) b.title = t === 'dark' ? '切换到浅色' : '切换到深色';
 }
 function initTheme(){
   var t = store.get('og_theme');
   if(!t) t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
-  applyTheme(t);
+  applyTheme(t, false);
+  // 跟随系统深浅色实时切换：仅在用户未手动选过主题时生效（选过就以用户为准）
+  try {
+    var mq = window.matchMedia('(prefers-color-scheme: light)');
+    var onSys = function(e){
+      if(!store.get('og_theme')) applyTheme(e.matches ? 'light' : 'dark', false);
+    };
+    if(mq.addEventListener) mq.addEventListener('change', onSys);
+    else if(mq.addListener) mq.addListener(onSys);
+  } catch(e){}
 }
 
 /* ---------- 登录 ---------- */
@@ -1379,7 +1428,7 @@ function filteredKeys(){
     if(st === 'expired' && !isExpired(k)) return false;
     if(st === 'exhausted' && !isExhausted(k)) return false;
     if(q){
-      var hay = [k.name, k.key].join(' ').toLowerCase();
+      var hay = [k.name, k.key, k.key_prefix].join(' ').toLowerCase();
       if(hay.indexOf(q) < 0) return false;
     }
     return true;
@@ -1399,11 +1448,12 @@ function renderKeys(){
     var subs = [];
     if(k.note) subs.push(esc(k.note));
     if(k.allowed_models && k.allowed_models.length && k.allowed_models.indexOf('*') < 0) subs.push('限 ' + esc(k.allowed_models.join('/')));
+    if(k.rpm != null) subs.push(k.rpm > 0 ? 'RPM ' + k.rpm : 'RPM 不限');
     if(k.last_used_at) subs.push('最近 ' + esc(fmtTime(k.last_used_at)));
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-key" data-i="' + i + '"' + (k.enabled !== false ? ' checked' : '') + '><span></span></label></td>' +
       '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub" title="' + esc(subs.join(' · ')) + '">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
-      '<td class="mono nowrap">' + esc(maskKey(k.key)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制完整密钥"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
+      '<td class="mono nowrap">' + esc(maskKey(k.key || k.key_prefix)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制密钥（仅创建当次可用；遗失请重新生成）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
       '<td>' + quotaCell(k) + '</td>' +
       '<td class="nowrap ar">' + fmtNum(k.used_tokens) + (k.quota_tokens > 0 ? ' <span class="muted">/ ' + fmtNum(k.quota_tokens) + '</span>' : '') + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
       '<td class="nowrap">' + expTxt + '</td>' +
@@ -1417,12 +1467,14 @@ function renderKeys(){
 }
 function openKeyModal(i){
   editingKey = i;
-  var k = i >= 0 ? S.keys[i] : { name:'', quota_tokens:0, allowed_models:[], enabled:true, note:'' };
+  var k = i >= 0 ? S.keys[i] : { name:'', quota_tokens:0, rpm:null, allowed_models:[], enabled:true, note:'' };
   var expVal = k.expires_at ? String(k.expires_at).slice(0, 10) : '';
+  var rpmVal = (k.rpm == null) ? '' : String(k.rpm);
   openModal('<h3>' + (i >= 0 ? '编辑密钥' : '生成密钥') + '</h3><p class="msub">' + (i >= 0 ? esc(k.name) : '将生成一串随机密钥，仅显示一次') + '</p>' +
     '<div class="grid">' +
     '<label>名称<input id="k_name" type="text" value="' + esc(k.name || '') + '" placeholder="如：前端应用"></label>' +
     '<label>Token 配额（0 表示不限）<input id="k_quota" type="number" min="0" value="' + esc(k.quota_tokens || 0) + '"></label>' +
+    '<label>RPM 限流（每分钟请求数，留空跟随全局默认，0 = 不限）<input id="k_rpm" type="number" min="0" value="' + esc(rpmVal) + '" placeholder="跟随全局默认"><span class="hint">软限流：防单 Key 瞬时打爆上游。Workers 多实例下实际上限 ≈ 配置 × 实例数；计费级强配额请用上面的 Token 配额。</span></label>' +
     '<label>允许调用的模型（逗号分隔，留空=全部）<input id="k_models" type="text" value="' + esc((k.allowed_models || []).join(',')) + '" placeholder="gpt-4o-mini,claude-sonnet-4-5"></label>' +
     '<label>有效期（留空=长期有效）<input id="k_exp" type="date" value="' + esc(expVal) + '"></label>' +
     '<label>备注<input id="k_note" type="text" value="' + esc(k.note || '') + '" placeholder="可选"></label>' +
@@ -1437,6 +1489,7 @@ function saveKey(){
     name: $('k_name').value.trim() || '未命名',
     enabled: $('k_enabled').checked,
     quota_tokens: parseInt($('k_quota').value, 10) || 0,
+    rpm: ($('k_rpm').value === '' ? null : (parseInt($('k_rpm').value, 10) || 0)),
     allowed_models: $('k_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
     note: $('k_note').value.trim(),
     expires_at: exp ? exp + 'T23:59:59.000Z' : ''
@@ -1455,7 +1508,7 @@ function saveKey(){
     closeModal(); renderKeys(); renderOverview();
     if(isNew){
       openModal('<h3>密钥已生成</h3><p class="msub">请立即复制保存，关闭后将无法再次查看完整密钥</p>' +
-        '<pre class="detail">' + esc(k.key) + '</pre>' +
+        '<pre class="detail">' + esc(k.key || (k.key_prefix + '……（完整密钥仅创建当次展示；遗失请重新生成）')) + '</pre>' +
         '<div class="row end"><button data-act="copy-text" data-t="' + esc(k.key) + '">复制密钥</button><button class="ghost" data-act="close-modal">关闭</button></div>', 'sm');
     } else {
       toast('密钥已保存', 'ok');
@@ -1465,14 +1518,15 @@ function saveKey(){
 function showCurl(i){
   var k = S.keys[i];
   var origin = window.location.origin;
+  var kk = k.key || (k.key_prefix + '<完整密钥>');
   var cmd = 'curl ' + origin + '/v1/chat/completions \\n' +
-    '  -H "Authorization: Bearer ' + k.key + '" \\n' +
+    '  -H "Authorization: Bearer ' + kk + '" \\n' +
     '  -H "Content-Type: application/json" \\n' +
     '  -d \\'{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": true}\\'';
   var js = 'const res = await fetch("' + origin + '/v1/chat/completions", {\\n' +
     '  method: "POST",\\n' +
     '  headers: {\\n' +
-    '    "Authorization": "Bearer ' + k.key + '",\\n' +
+    '    "Authorization": "Bearer ' + kk + '",\\n' +
     '    "Content-Type": "application/json"\\n' +
     '  },\\n' +
     '  body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "你好" }] })\\n' +
@@ -1618,16 +1672,24 @@ function renderSettings(){
   $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
   $('s_timeout').value = s.request_timeout_ms || 60000;
   $('s_stream_idle').value = s.stream_idle_timeout_ms || 60000;
+  $('s_firstbyte').value = s.stream_first_byte_ms === 0 ? 0 : s.stream_first_byte_ms || 120000;
   $('s_stream_ka').value =
     s.stream_keepalive_ms === 0 ? 0 : s.stream_keepalive_ms || 15000;
   $('s_retries').value = s.retries == null ? 1 : s.retries;
   $('s_retention').value = s.log_retention_days || 30;
   $('s_tz').value = s.timezone_offset_minutes == null ? 480 : s.timezone_offset_minutes;
   $('s_models').value = (s.custom_models || []).join(',');
+  $('s_rpm_default').value = s.rpm_default == null ? 0 : s.rpm_default;
+  $('s_backup_keep').value = s.backup_keep_days == null ? 7 : s.backup_keep_days;
+  $('s_tg_token').value = s.tg_bot_token || '';
+  $('s_tg_chat').value = s.tg_chat_id || '';
+  $('s_tg_down').checked = s.tg_notify_down !== false;
+  $('s_tg_up').checked = s.tg_notify_up === true;
   var dp = s.default_pricing || { in:0, out:0 };
   $('s_pin').value = dp.in || 0;
   $('s_pout').value = dp.out || 0;
   renderPriceRows(s.pricing || {});
+  renderBackups();
 }
 function priceRowHtml(model, p){
   return '<div class="prow"><input class="p_model" type="text" placeholder="模型名" value="' + esc(model || '') + '">' +
@@ -1657,6 +1719,10 @@ function collectSettings(){
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
     request_timeout_ms: parseInt($('s_timeout').value, 10) || 60000,
     stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 60000,
+    stream_first_byte_ms: (() => {
+      const v = parseInt($('s_firstbyte').value, 10);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    })(),
     stream_keepalive_ms: (() => {
       const v = parseInt($('s_stream_ka').value, 10);
       return Number.isFinite(v) ? Math.max(0, v) : 15000;
@@ -1666,7 +1732,13 @@ function collectSettings(){
     timezone_offset_minutes: tz,
     custom_models: $('s_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
     default_pricing: { in: Number($('s_pin').value) || 0, out: Number($('s_pout').value) || 0 },
-    pricing: pricing
+    pricing: pricing,
+    rpm_default: Math.max(0, parseInt($('s_rpm_default').value, 10) || 0),
+    backup_keep_days: Math.max(0, parseInt($('s_backup_keep').value, 10) || 0),
+    tg_bot_token: $('s_tg_token').value.trim(),
+    tg_chat_id: $('s_tg_chat').value.trim(),
+    tg_notify_down: $('s_tg_down').checked,
+    tg_notify_up: $('s_tg_up').checked
   };
 }
 function saveSettings(btn){
@@ -1687,6 +1759,86 @@ function cleanupLogs(btn){
       toast('已清理 ' + r.removed_dates + ' 天 / ' + r.removed_logs + ' 条日志', 'ok');
     }).catch(function(e){ toast(e.message, 'bad'); })
       .then(function(){ btn.disabled = false; });
+  });
+}
+
+/* ---------- 备份与恢复 ---------- */
+function fmtBytes(n){
+  if(n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if(n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n || 0) + ' B';
+}
+function renderBackups(){
+  var el = $('backupList');
+  if(!el) return;
+  api('/api/admin/backups', 'GET').then(function(r){
+    var list = r.backups || [];
+    if(!list.length){
+      el.innerHTML = '暂无自动备份 —— 每天首个请求触发一次快照，保留最近 ' + (r.keep_days || 7) + ' 份。';
+      return;
+    }
+    var h = '<div class="bhead"><span>日期</span><span>大小</span><span></span></div>';
+    list.forEach(function(b){
+      h += '<div class="brow"><span>' + esc(b.date) + '</span><span class="muted">' + fmtBytes(b.size) + '</span>' +
+        '<span><a class="mini-link" href="/api/admin/backups?date=' + esc(b.date) + '" download>下载</a></span></div>';
+    });
+    el.innerHTML = h + '<div class="hint" style="margin-top:8px">自动备份每天首个请求触发一次，当前保留 ' + (r.keep_days || 7) + ' 份；「立即导出」生成的是当前时刻的完整快照。</div>';
+  }).catch(function(e){
+    el.textContent = '备份列表加载失败：' + e.message;
+  });
+}
+function exportBackup(btn){
+  var a = document.createElement('a');
+  a.href = '/api/admin/backup';
+  a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('备份快照已开始下载', 'ok');
+}
+function testNotify(btn){
+  var payload = {
+    tg_bot_token: $('s_tg_token').value.trim(),
+    tg_chat_id: $('s_tg_chat').value.trim()
+  };
+  if(!payload.tg_bot_token || !payload.tg_chat_id){
+    toast('请先填写 Telegram Bot Token 与 Chat ID', 'bad');
+    return;
+  }
+  btn.disabled = true; var old = btn.textContent; btn.textContent = '发送中…';
+  api('/api/admin/test-notify', 'POST', payload).then(function(r){
+    if(r.ok) toast('测试消息已发送，请在 Telegram 查收', 'ok');
+    else toast('发送失败：' + (r.detail || '未知原因'), 'bad');
+  }).catch(function(e){ toast('发送失败：' + e.message, 'bad'); })
+    .then(function(){ btn.disabled = false; btn.textContent = old; });
+}
+function bindRestoreFile(){
+  var f = $('restoreFile');
+  if(!f || f.dataset.bound) return;
+  f.dataset.bound = '1';
+  f.addEventListener('change', function(){
+    var file = this.files && this.files[0];
+    this.value = '';
+    if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(){
+      var snap;
+      try { snap = JSON.parse(reader.result); }
+      catch(e){ toast('文件不是合法 JSON', 'bad'); return; }
+      if(!snap || snap.type !== 'oneapi-gateway-backup' || !Array.isArray(snap.channels) || !Array.isArray(snap.keys)){
+        toast('不是有效的网关备份文件（需要「立即导出」生成的完整快照）', 'bad'); return;
+      }
+      var when = snap.created_at ? String(snap.created_at).replace('T',' ').slice(0,19) + ' UTC' : '未知时间';
+      confirmDlg('确认恢复备份',
+        '将用 ' + esc(when) + ' 的备份整体覆盖当前的渠道（' + snap.channels.length + ' 个）、密钥（' + snap.keys.length + ' 个）与设置，且不可撤销。确定继续？'
+      ).then(function(ok){
+        if(!ok) return;
+        snap.confirm = true;
+        api('/api/admin/restore', 'POST', snap).then(function(r){
+          toast('已恢复 ' + r.channels + ' 个渠道 / ' + r.keys + ' 个密钥，页面即将刷新', 'ok');
+          setTimeout(function(){ location.reload(); }, 1200);
+        }).catch(function(e){ toast(e.message, 'bad'); });
+      });
+    };
+    reader.readAsText(file);
   });
 }
 
@@ -1762,7 +1914,9 @@ document.addEventListener('click', function(e){
     });
   }
   else if(act === 'copy-key'){
-    copyText(S.keys[i].key);
+    var ck = S.keys[i];
+    if(ck && ck.key){ copyText(ck.key); }
+    else { toast('密钥已加密存储，完整密钥仅创建当次展示；遗失请重新生成', 'bad'); }
   }
   else if(act === 'copy-text'){
     copyText(el.getAttribute('data-t'));
@@ -1807,6 +1961,9 @@ document.addEventListener('click', function(e){
   else if(act === 'price-add') $('priceRows').insertAdjacentHTML('beforeend', priceRowHtml('', { in:0, out:0 }));
   else if(act === 'price-del') el.closest('.prow').remove();
   else if(act === 'cleanup-logs') cleanupLogs(el);
+  else if(act === 'backup-export') exportBackup(el);
+  else if(act === 'test-notify') testNotify(el);
+  else if(act === 'backup-restore'){ bindRestoreFile(); var rf = $('restoreFile'); if(rf) rf.click(); }
 });
 
 function copyText(t){
