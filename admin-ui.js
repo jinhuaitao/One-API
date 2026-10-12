@@ -447,7 +447,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="seg" id="rangeSeg">
             <button class="segbtn" data-range="7">7 天</button>
             <button class="segbtn on" data-range="14">14 天</button>
-            <button class="segbtn" data-range="30">30 天</button>
+            <button class="segbtn" data-range="21">21 天</button>
           </div>
           <div class="spacer"></div>
           <button class="ghost sm" data-act="refresh-stats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>刷新</button>
@@ -1428,7 +1428,7 @@ function filteredKeys(){
     if(st === 'expired' && !isExpired(k)) return false;
     if(st === 'exhausted' && !isExhausted(k)) return false;
     if(q){
-      var hay = [k.name, k.key].join(' ').toLowerCase();
+      var hay = [k.name, k.key, k.key_prefix].join(' ').toLowerCase();
       if(hay.indexOf(q) < 0) return false;
     }
     return true;
@@ -1453,7 +1453,7 @@ function renderKeys(){
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-key" data-i="' + i + '"' + (k.enabled !== false ? ' checked' : '') + '><span></span></label></td>' +
       '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub" title="' + esc(subs.join(' · ')) + '">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
-      '<td class="mono nowrap">' + esc(maskKey(k.key)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制完整密钥"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
+      '<td class="mono nowrap">' + esc(maskKey(k.key || k.key_prefix)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制密钥（仅创建当次可用；遗失请重新生成）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
       '<td>' + quotaCell(k) + '</td>' +
       '<td class="nowrap ar">' + fmtNum(k.used_tokens) + (k.quota_tokens > 0 ? ' <span class="muted">/ ' + fmtNum(k.quota_tokens) + '</span>' : '') + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
       '<td class="nowrap">' + expTxt + '</td>' +
@@ -1508,7 +1508,7 @@ function saveKey(){
     closeModal(); renderKeys(); renderOverview();
     if(isNew){
       openModal('<h3>密钥已生成</h3><p class="msub">请立即复制保存，关闭后将无法再次查看完整密钥</p>' +
-        '<pre class="detail">' + esc(k.key) + '</pre>' +
+        '<pre class="detail">' + esc(k.key || (k.key_prefix + '……（完整密钥仅创建当次展示；遗失请重新生成）')) + '</pre>' +
         '<div class="row end"><button data-act="copy-text" data-t="' + esc(k.key) + '">复制密钥</button><button class="ghost" data-act="close-modal">关闭</button></div>', 'sm');
     } else {
       toast('密钥已保存', 'ok');
@@ -1518,14 +1518,15 @@ function saveKey(){
 function showCurl(i){
   var k = S.keys[i];
   var origin = window.location.origin;
+  var kk = k.key || (k.key_prefix + '<完整密钥>');
   var cmd = 'curl ' + origin + '/v1/chat/completions \\n' +
-    '  -H "Authorization: Bearer ' + k.key + '" \\n' +
+    '  -H "Authorization: Bearer ' + kk + '" \\n' +
     '  -H "Content-Type: application/json" \\n' +
     '  -d \\'{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": true}\\'';
   var js = 'const res = await fetch("' + origin + '/v1/chat/completions", {\\n' +
     '  method: "POST",\\n' +
     '  headers: {\\n' +
-    '    "Authorization": "Bearer ' + k.key + '",\\n' +
+    '    "Authorization": "Bearer ' + kk + '",\\n' +
     '    "Content-Type": "application/json"\\n' +
     '  },\\n' +
     '  body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "你好" }] })\\n' +
@@ -1913,7 +1914,9 @@ document.addEventListener('click', function(e){
     });
   }
   else if(act === 'copy-key'){
-    copyText(S.keys[i].key);
+    var ck = S.keys[i];
+    if(ck && ck.key){ copyText(ck.key); }
+    else { toast('密钥已加密存储，完整密钥仅创建当次展示；遗失请重新生成', 'bad'); }
   }
   else if(act === 'copy-text'){
     copyText(el.getAttribute('data-t'));

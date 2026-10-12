@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
@@ -463,8 +463,13 @@ async function authApiKey(env, request, settings) {
   }
   // 走短 TTL 缓存：密钥校验是每个 /v1/* 请求的必经步骤，省下这次 R2 往返很值。
   // 控制台保存密钥会主动失效缓存，所以「禁用后立即生效」不受影响。
+  // 匹配按 SHA-256 哈希进行（存储不落明文）；老数据（仍有 key 明文字段）兼容明文匹配，
+  // 命中后由控制台 GET 密钥页时惰性迁移，双格式并存期间不影响鉴权。
   const keys = await cachedJson(env, KEYS_KEY, [], KEYS_TTL_MS);
-  const rec = keys.find((k) => k.key === token);
+  const tokenHash = await sha256Hex(token);
+  const rec = keys.find(
+    (k) => (k.key_hash ? k.key_hash === tokenHash : typeof k.key === 'string' && k.key === token)
+  );
   if (!rec) {
     return { ok: false, res: err('无效的 API Key', 401, 'invalid_key') };
   }
@@ -497,6 +502,27 @@ async function safeEqual(a, b) {
   let diff = 0;
   for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
   return diff === 0;
+}
+
+/** SHA-256 → 小写 hex。网关密钥只存哈希不存明文：R2 桶泄露时密钥不跟着裸奔。 */
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
+  return Array.prototype.map
+    .call(new Uint8Array(buf), (b) => ('0' + b.toString(16)).slice(-2))
+    .join('');
+}
+
+/** 把含明文 key 的条目归一化为 { key_hash, key_prefix }（幂等，原数组就地修改）。
+ *  触发点：控制台保存密钥（整包提交）、打开控制台密钥页（GET 惰性迁移老数据）。 */
+async function hashKeyRecords(list) {
+  for (const k of list || []) {
+    if (k && typeof k.key === 'string' && k.key) {
+      k.key_hash = await sha256Hex(k.key);
+      k.key_prefix = String(k.key).slice(0, 12);
+      delete k.key;
+    }
+  }
+  return list || [];
 }
 
 async function requireAdmin(env, request) {
@@ -1511,7 +1537,11 @@ async function bumpKeyUsage(env, auth, tokens, cost) {
   try {
     await withLock(KEYS_KEY, async () => {
       const keys = await r2GetJson(env, KEYS_KEY, []);
-      const rec = keys.find((k) => k.key === auth.record.key);
+      const rec = keys.find(
+        (k) =>
+          (auth.record.key_hash && k.key_hash === auth.record.key_hash) ||
+          (auth.record.key && k.key === auth.record.key)
+      );
       if (rec) {
         rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
         rec.requests = (rec.requests || 0) + 1;
@@ -1838,7 +1868,9 @@ function matchLog(l, f) {
 
 /** 列出某天的日志（倒序）。R2 list 天然按倒序时间戳返回，因此游标翻页即「更旧的一页」 */
 async function listLogs(env, date, opts) {
-  const limit = clampInt(opts.limit, 1, 500, 50);
+  // limit 上限 40：list 1 次 + 逐条 get 40 次 = 41 次 subrequest，加鉴权/设置读取
+  // 仍须落在免费版「单请求 50 次 subrequest」硬顶之内（旧上限 500 必炸）。
+  const limit = clampInt(opts.limit, 1, 40, 40);
   const prefix = `${LOG_PREFIX}${date}/`;
   const listed = await env.R2.list({
     prefix,
@@ -1890,7 +1922,10 @@ function toSortedList(map, limit) {
 
 /** 聚合最近 N 天的统计 */
 async function loadStats(env, days, settings) {
-  const n = clampInt(days, 1, 90, 14);
+  // 上限 22：当期 + 环比两次窗口 = 44 次 R2 读，必须落在 Cloudflare Workers
+  // 免费版「单请求 50 次 subrequest」硬顶之内（90 天 = 180 读必炸，30 天 = 60 读也炸）。
+  // 想看更长趋势请依赖每日自动备份里的 backup/<日期>.json 快照。
+  const n = clampInt(days, 1, 22, 14);
   const offset = settings && settings.timezone_offset_minutes;
   const dates = [];
   const base = Date.now();
@@ -2130,7 +2165,14 @@ function checkRpm(auth, settings) {
     rpmBuckets.set(id, b);
   }
   b.count++;
-  if (rpmBuckets.size > 10000) rpmBuckets.clear(); // 极端膨胀保护（大量一次性 Key）
+  if (rpmBuckets.size > 10000) {
+    // LRU 淘汰最旧的一半，而不是整表 clear()——整表清零等于给所有 Key
+    // （包括正在被滥用的）同时发一枚「免限流窗口」，也误伤正常用户
+    const stale = Array.from(rpmBuckets.entries())
+      .sort((a, b2) => a[1].winStart - b2[1].winStart)
+      .slice(0, Math.ceil(rpmBuckets.size / 2));
+    for (const [sid] of stale) rpmBuckets.delete(sid);
+  }
   return b.count <= effRpm;
 }
 
@@ -2316,13 +2358,31 @@ async function handleAdmin(env, ctx, request) {
 
   /* ---- 密钥 ---- */
   if (path === '/api/admin/keys' && request.method === 'GET') {
-    return json(await r2GetJson(env, KEYS_KEY, []));
+    const keys = await r2GetJson(env, KEYS_KEY, []);
+    // 惰性迁移：老数据（明文 key）在打开控制台时转哈希并写回，之后响应里不再出现明文
+    let mutated = false;
+    for (const k of keys) {
+      if (typeof k.key === 'string' && k.key) {
+        k.key_hash = await sha256Hex(k.key);
+        k.key_prefix = String(k.key).slice(0, 12);
+        delete k.key;
+        mutated = true;
+      }
+    }
+    if (mutated) {
+      ctx.waitUntil(
+        withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, keys)).then(() => invalidateCache(KEYS_KEY))
+      );
+    }
+    return json(keys);
   }
   if (path === '/api/admin/keys' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     if (!body || !Array.isArray(body.keys)) {
       return err('请求体应为 {keys: [...]}', 400, 'invalid_body');
     }
+    // 归一化：前端提交的新密钥明文就地转 { key_hash, key_prefix }，R2 永不落明文
+    await hashKeyRecords(body.keys);
     // 与用量累加共用一把锁，避免编辑被并发请求的用量写回覆盖
     await withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys));
     invalidateCache(KEYS_KEY); // 禁用 / 改配额后立即生效，不等待 TTL
@@ -2347,7 +2407,7 @@ async function handleAdmin(env, ctx, request) {
       url.searchParams.get('date') || dateStr(Date.now(), settings.timezone_offset_minutes);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return err('日期格式应为 YYYY-MM-DD', 400, 'bad_date');
     const out = await listLogs(env, date, {
-      limit: url.searchParams.get('limit') || 50,
+      limit: url.searchParams.get('limit') || 40,
       cursor: url.searchParams.get('cursor') || undefined,
       ok: url.searchParams.get('ok') || '',
       stream: url.searchParams.get('stream') || '',

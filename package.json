@@ -10,10 +10,10 @@
     "deploy": "node scripts/ensure-r2.mjs && wrangler deploy",
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
-    "test": "node test/smoke.mjs",
-    "test:stream": "node test/stream-sse.mjs",
+    "test": "node test/run-all.mjs",
+    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs",
     "preview": "node preview/build.mjs"
   },
   "type": "module",
-  "version": "2.0.0"
+  "version": "2.1.0"
 }
