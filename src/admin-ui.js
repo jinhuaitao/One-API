@@ -18,124 +18,173 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234d7cff'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='36' height='36' rx='9' fill='url(%23g)'/%3E%3Cpath d='M11 21.5l4.6-5.4 3.4 3 5.9-7.1' stroke='%23fff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='25.5' cy='11' r='1.9' fill='%23fff'/%3E%3C/svg%3E">
 <title>OneAPI Gateway · 控制台</title>
 <style>
+  /* ============================================================
+     设计令牌（Design Tokens）
+     所有间距 / 圆角 / 字号 / 阴影都从这里取值，保证全局协调一致。
+     ============================================================ */
   :root{
-    --radius:12px; --radius-sm:8px;
-    --headh:70px;      /* 侧栏品牌区 / 顶栏 统一高度，保证两条下边框对齐 */
-    --gutter:26px;     /* 主区左右留白（顶栏与内容区共用，避免错位） */
+    /* 圆角梯度 */
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    /* 间距梯度 */
+    --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:26px;
+    /* 布局 */
+    --sidebar-w:242px;
+    --headh:68px;      /* 侧栏品牌区 / 顶栏 统一高度，保证两条下边框对齐 */
+    --gutter:28px;     /* 主区左右留白（顶栏与内容区共用，避免错位） */
+    --maxw:1280px;
+    /* 字体 */
     --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    /* 动效 */
     --ease:cubic-bezier(.4,0,.2,1);
+    --ease-out:cubic-bezier(.16,1,.3,1);
+    --t-fast:.14s; --t:.2s;
   }
   html[data-theme="dark"]{
-    --bg:#070b14; --bg2:#0a1020; --panel:#0f1729; --panel2:#131d33; --elev:#16203a;
-    --border:#1d2942; --border2:#27354f;
-    --text:#e8eefb; --text2:#a9b6d0; --muted:#6d7b96;
-    --accent:#4d7cff; --accent2:#8b5cf6; --accent-soft:rgba(77,124,255,.15);
+    --bg:#080c16; --bg2:#0b1120; --panel:#0e1526; --panel2:#131c31; --elev:#172138;
+    --border:#1c2740; --border2:#26334e; --border3:#33415f;
+    --text:#e9eefb; --text2:#a7b4cd; --muted:#6b7995;
+    --accent:#5b8cff; --accent2:#8b5cf6; --accent-soft:rgba(91,140,255,.14); --accent-line:rgba(91,140,255,.34);
     --ok:#34d399; --ok-soft:rgba(52,211,153,.13);
     --bad:#f87171; --bad-soft:rgba(248,113,113,.13);
     --warn:#fbbf24; --warn-soft:rgba(251,191,36,.13);
-    --shadow:0 12px 34px rgba(0,0,0,.42);
+    --sh-1:0 1px 2px rgba(0,0,0,.3);
+    --sh-2:0 8px 24px rgba(0,0,0,.34);
+    --sh-3:0 20px 52px rgba(0,0,0,.52);
     --grid:#182238; --hover:#16203a; --input:#0a1120;
+    --skeleton-a:#131c31; --skeleton-b:#1a2540;
   }
   html[data-theme="light"]{
-    --bg:#f4f6fb; --bg2:#eef1f8; --panel:#ffffff; --panel2:#f8fafd; --elev:#ffffff;
-    --border:#e5e9f2; --border2:#d6dded;
-    --text:#0f172a; --text2:#3d4a63; --muted:#7b8798;
-    --accent:#2563eb; --accent2:#7c3aed; --accent-soft:rgba(37,99,235,.10);
+    --bg:#f5f7fb; --bg2:#eef2f9; --panel:#ffffff; --panel2:#f8fafd; --elev:#ffffff;
+    --border:#e7ebf3; --border2:#d8dee9; --border3:#c4cddd;
+    --text:#0d1526; --text2:#414e66; --muted:#78849a;
+    --accent:#2563eb; --accent2:#7c3aed; --accent-soft:rgba(37,99,235,.09); --accent-line:rgba(37,99,235,.3);
     --ok:#059669; --ok-soft:rgba(5,150,105,.10);
     --bad:#dc2626; --bad-soft:rgba(220,38,38,.10);
     --warn:#d97706; --warn-soft:rgba(217,119,6,.10);
-    --shadow:0 8px 26px rgba(15,23,42,.09);
+    --sh-1:0 1px 2px rgba(15,23,42,.05);
+    --sh-2:0 6px 22px rgba(15,23,42,.08);
+    --sh-3:0 20px 52px rgba(15,23,42,.18);
     --grid:#e9edf5; --hover:#f4f7fd; --input:#f7f9fd;
+    --skeleton-a:#eef1f8; --skeleton-b:#e2e7f2;
   }
+
+  /* ============================================================
+     基础
+     ============================================================ */
   *{box-sizing:border-box}
   html,body{height:100%}
-  body{margin:0;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;-webkit-font-smoothing:antialiased}
+  body{margin:0;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
   ::-webkit-scrollbar{width:10px;height:10px}
-  ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:var(--r-pill);border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:var(--border3);background-clip:content-box}
   ::-webkit-scrollbar-track{background:transparent}
-  a{color:var(--accent)}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
   svg{width:16px;height:16px;flex-shrink:0}
+  .tnum{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
   .app{display:flex;min-height:100vh}
 
-  /* ---------- sidebar ---------- */
-  .sidebar{width:238px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
-  .brand{height:var(--headh);flex-shrink:0;padding:0 22px;display:flex;align-items:center;gap:11px;border-bottom:1px solid var(--border)}
-  .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:14px;flex-shrink:0;letter-spacing:.5px;box-shadow:0 6px 16px var(--accent-soft)}
-  .brand b{font-size:14.5px;display:block;letter-spacing:.2px;line-height:1.35}
-  .brand span{font-size:11px;color:var(--muted);line-height:1.35}
+  /* ============================================================
+     侧栏
+     ============================================================ */
+  .sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+  .brand{height:var(--headh);flex-shrink:0;padding:0 20px;display:flex;align-items:center;gap:11px;border-bottom:1px solid var(--border)}
+  .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(140deg,var(--accent),var(--accent2));display:grid;place-items:center;flex-shrink:0;box-shadow:0 6px 16px var(--accent-soft)}
+  .logo svg{width:20px;height:20px;color:#fff}
+  .brand b{font-size:14px;display:block;letter-spacing:.2px;line-height:1.35;font-weight:650}
+  .brand span{font-size:11px;color:var(--muted);line-height:1.35;display:block;margin-top:1px}
   .nav{padding:10px 10px 16px;display:flex;flex-direction:column;gap:2px;flex:1;overflow:auto}
-  .navsec{font-size:10.5px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.08em;padding:14px 14px 6px}
+  .navsec{font-size:10.5px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.09em;padding:14px 12px 6px}
   .navsec:first-child{padding-top:6px}
-  .navbtn{display:flex;align-items:center;justify-content:flex-start;gap:11px;width:100%;background:none;border:none;color:var(--text2);padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;font-size:13.5px;line-height:1.4;text-align:left;font-family:inherit;transition:background .15s var(--ease),color .15s var(--ease)}
+  .navbtn{position:relative;display:flex;align-items:center;justify-content:flex-start;gap:11px;width:100%;background:none;border:none;color:var(--text2);padding:9px 12px;border-radius:var(--r-sm);cursor:pointer;font-size:13.5px;line-height:1.4;text-align:left;font-family:inherit;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
   .navbtn:hover{background:var(--hover);color:var(--text)}
   .navbtn.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-  .navbtn .badge-n{margin-left:auto;font-size:11px;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:1px 7px;border-radius:20px}
+  .navbtn.on::before{content:'';position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:0 3px 3px 0;background:var(--accent)}
+  .navbtn .badge-n{margin-left:auto;font-size:11px;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:1px 7px;border-radius:var(--r-pill);font-variant-numeric:tabular-nums}
   .navbtn.on .badge-n{background:var(--accent);border-color:transparent;color:#fff}
   .side-foot{padding:12px 10px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
-  .side-row{display:flex;gap:8px;align-items:center;padding:0 12px}
+  .side-row{display:flex;gap:8px;align-items:center;padding:0 10px}
   .side-row .grow{flex:1;min-width:0;font-size:11.5px;color:var(--muted);line-height:1.5}
   .side-row .grow b{display:block;color:var(--text2);font-weight:600;font-size:12px}
 
-  /* ---------- main / topbar ---------- */
+  /* ============================================================
+     主区 / 顶栏
+     ============================================================ */
   main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .topbar{height:var(--headh);flex-shrink:0;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:20}
-  .topbar-in{max-width:1240px;margin:0 auto;height:100%;padding:0 var(--gutter);display:flex;justify-content:space-between;align-items:center;gap:16px}
-  .topbar h2{margin:0;font-size:16.5px;letter-spacing:.2px;line-height:1.3}
+  .topbar{height:var(--headh);flex-shrink:0;border-bottom:1px solid var(--border);background:var(--panel);background:color-mix(in srgb,var(--panel) 86%,transparent);backdrop-filter:blur(12px) saturate(1.6);-webkit-backdrop-filter:blur(12px) saturate(1.6);position:sticky;top:0;z-index:20}
+  .topbar-in{max-width:var(--maxw);margin:0 auto;height:100%;padding:0 var(--gutter);display:flex;justify-content:space-between;align-items:center;gap:16px}
+  .topbar h2{margin:0;font-size:16px;font-weight:650;letter-spacing:.1px;line-height:1.3}
   .topbar p{margin:2px 0 0;font-size:12px;color:var(--muted);line-height:1.3}
   .topbar .right{display:flex;gap:9px;align-items:center;flex-shrink:0}
-  .content{padding:22px var(--gutter) 60px;max-width:1240px;width:100%;margin:0 auto}
-  .tab{display:none}.tab.on{display:block;animation:fade .22s var(--ease)}
-  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .content{padding:22px var(--gutter) 64px;max-width:var(--maxw);width:100%;margin:0 auto}
+  .tab{display:none}
+  .tab.on{display:block;animation:fade .24s var(--ease-out)}
+  @keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 
-  /* ---------- pills / badges ---------- */
-  .pill{font-size:11.5px;padding:5px 12px;border-radius:20px;background:var(--panel2);color:var(--muted);border:1px solid var(--border);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+  /* ============================================================
+     胶囊 / 徽章 / 标签
+     ============================================================ */
+  .pill{font-size:11.5px;padding:5px 12px;border-radius:var(--r-pill);background:var(--panel2);color:var(--muted);border:1px solid var(--border);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
   .pill.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
   .pill.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
   .pill.wait{background:var(--warn-soft);color:var(--warn);border-color:transparent}
   .pill .dt{width:7px;height:7px;border-radius:50%;background:currentColor}
-  .badge{display:inline-block;padding:3px 9px;border-radius:6px;font-size:11.5px;background:var(--panel2);color:var(--text2);white-space:nowrap;border:1px solid var(--border);flex-shrink:0}
+  .pill.wait .dt{animation:pulse 1.1s var(--ease) infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.28}}
+  .badge{display:inline-block;padding:3px 9px;border-radius:var(--r-xs);font-size:11.5px;background:var(--panel2);color:var(--text2);white-space:nowrap;border:1px solid var(--border);flex-shrink:0;line-height:1.5}
   .badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
   .badge.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
   .badge.info{background:var(--accent-soft);color:var(--accent);border-color:transparent}
   .badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
-  .chip{display:inline-block;padding:2px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--border);font-size:11.5px;margin:1px 3px 1px 0;color:var(--text2);font-family:var(--mono)}
+  .chip{display:inline-block;padding:2px 8px;border-radius:var(--r-xs);background:var(--panel2);border:1px solid var(--border);font-size:11.5px;margin:1px 3px 1px 0;color:var(--text2);font-family:var(--mono);line-height:1.6}
   .chip .nm{white-space:nowrap}
   .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;background:var(--border2)}
   .dot.ok{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
   .dot.bad{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
 
-  /* ---------- stats ---------- */
-  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;position:relative;overflow:hidden}
-  .stat .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-  .stat .label{color:var(--muted);font-size:12.5px}
-  .stat .ic{width:30px;height:30px;border-radius:9px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center}
+  /* ============================================================
+     指标卡
+     ============================================================ */
+  .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-4)}
+  .stat{position:relative;background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px 18px;overflow:hidden;transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease),transform var(--t) var(--ease)}
+  .stat::after{content:'';position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(90deg,var(--accent),var(--accent2));opacity:0;transition:opacity var(--t) var(--ease)}
+  .stat:hover{border-color:var(--border2);box-shadow:var(--sh-2);transform:translateY(-1px)}
+  .stat:hover::after{opacity:.9}
+  .stat-h{display:flex;align-items:center;gap:10px}
+  .stat .label{color:var(--text2);font-size:12.5px;font-weight:500}
+  .stat .ic{width:30px;height:30px;border-radius:var(--r-md);background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;flex-shrink:0}
   .stat .ic.ok{background:var(--ok-soft);color:var(--ok)}
   .stat .ic.bad{background:var(--bad-soft);color:var(--bad)}
   .stat .ic.warn{background:var(--warn-soft);color:var(--warn)}
-  .stat .num{font-size:25px;font-weight:700;margin-top:10px;letter-spacing:-.4px}
-  .stat .sub{font-size:11.5px;color:var(--muted);margin-top:5px}
+  .stat .num{font-size:25px;font-weight:700;margin-top:12px;letter-spacing:-.4px;line-height:1.15;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;flex-wrap:wrap;gap:0}
+  .stat .sub{font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.5}
 
-  /* ---------- cards ---------- */
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-top:16px}
+  /* ============================================================
+     卡片
+     ============================================================ */
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px 20px;margin-top:var(--sp-4)}
   .card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}
-  .card h3{margin:0;font-size:14.5px}
+  .card h3{margin:0;font-size:14.5px;font-weight:650;letter-spacing:.1px}
   .card .desc{color:var(--muted);font-size:12.5px;margin:4px 0 0;line-height:1.6}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  .grid2 .card{margin-top:16px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4)}
+  .grid2 .card{margin-top:var(--sp-4)}
 
-  /* ---------- toolbar / inputs ---------- */
+  /* ============================================================
+     工具条 / 表单控件
+     ============================================================ */
   .toolbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
   .toolbar .spacer{flex:1}
   .search{position:relative;display:flex;align-items:center}
   .search svg{position:absolute;left:10px;color:var(--muted);pointer-events:none;width:14px;height:14px}
   .search input{padding-left:32px;min-width:190px}
   input[type=text],input[type=password],input[type=date],input[type=number],input[type=datetime-local],textarea,select{
-    background:var(--input);border:1px solid var(--border2);color:var(--text);padding:8px 11px;border-radius:var(--radius-sm);font-size:13px;width:100%;font-family:inherit;transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
+    background:var(--input);border:1px solid var(--border2);color:var(--text);padding:8px 11px;border-radius:var(--r-sm);font-size:13px;width:100%;font-family:inherit;line-height:1.5;transition:border-color var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease),background var(--t-fast) var(--ease)}
+  input:hover:not(:focus),textarea:hover:not(:focus),select:hover:not(:focus){border-color:var(--border3)}
   input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  input::placeholder,textarea::placeholder{color:var(--muted);opacity:.85}
   select.sel{width:auto;min-width:112px;cursor:pointer}
-  textarea{resize:vertical;font-family:var(--mono);font-size:12.5px;line-height:1.6}
+  textarea{resize:vertical;font-family:var(--mono);font-size:12.5px;line-height:1.65}
   input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
   .grid label,.fld{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text2)}
@@ -144,47 +193,53 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .check input{width:auto}
   .row{display:flex;gap:9px;margin-top:16px;align-items:center;flex-wrap:wrap}
   .row.end{justify-content:flex-end}
-  .hint{font-size:11.5px;color:var(--muted);line-height:1.55;margin-top:2px}
+  .hint{font-size:11.5px;color:var(--muted);line-height:1.6;margin-top:2px}
 
-  /* ---------- buttons ---------- */
-  button{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;padding:8px 15px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;font-family:inherit;font-weight:500;transition:filter .15s var(--ease),transform .1s var(--ease);display:inline-flex;align-items:center;gap:6px;justify-content:center}
-  button:hover{filter:brightness(1.08)}
+  /* ============================================================
+     按钮
+     ============================================================ */
+  button{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;padding:8px 15px;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-family:inherit;font-weight:500;line-height:1.4;transition:filter var(--t-fast) var(--ease),transform .1s var(--ease),box-shadow var(--t-fast) var(--ease),background var(--t-fast) var(--ease),color var(--t-fast) var(--ease);display:inline-flex;align-items:center;gap:6px;justify-content:center;white-space:nowrap}
+  button:hover{filter:brightness(1.09);box-shadow:0 4px 14px var(--accent-soft)}
   button:active{transform:translateY(1px)}
-  button:disabled{opacity:.5;cursor:default;transform:none}
-  button.ghost{background:var(--panel2);color:var(--text2);border:1px solid var(--border)}
-  button.ghost:hover{background:var(--hover);color:var(--text);filter:none}
-  button.danger{background:var(--bad)}
-  button.soft{background:var(--bad-soft);color:var(--bad)}
-  button.sm{padding:6px 11px;font-size:12.5px;border-radius:7px}
+  button:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;filter:none}
+  button.ghost{background:var(--panel2);color:var(--text2);border:1px solid var(--border);box-shadow:none}
+  button.ghost:hover{background:var(--hover);color:var(--text);filter:none;border-color:var(--border2);box-shadow:var(--sh-1)}
+  button.danger{background:var(--bad);box-shadow:none}
+  button.danger:hover{box-shadow:0 4px 14px var(--bad-soft)}
+  button.soft{background:var(--bad-soft);color:var(--bad);box-shadow:none}
+  button.soft:hover{filter:none;background:var(--bad-soft);color:var(--bad);box-shadow:0 0 0 1px var(--bad-soft)}
+  button.sm{padding:6px 11px;font-size:12.5px;border-radius:var(--r-xs)}
   button.sm svg{width:14px;height:14px}
-  .icon-btn{background:var(--panel2);border:1px solid var(--border);color:var(--text2);padding:7px;border-radius:8px;width:auto}
-  .icon-btn:hover{background:var(--hover);color:var(--text);filter:none}
-  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:3px;gap:2px}
-  .segbtn{background:none;border:none;color:var(--muted);padding:6px 13px;border-radius:7px;font-size:12.5px;font-weight:500}
-  .segbtn:hover{color:var(--text);filter:none;background:none}
-  .segbtn.on{background:var(--panel);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.14)}
+  .icon-btn{background:var(--panel2);border:1px solid var(--border);color:var(--text2);padding:7px;border-radius:var(--r-sm);width:auto;box-shadow:none}
+  .icon-btn:hover{background:var(--hover);color:var(--text);filter:none;border-color:var(--border2);box-shadow:var(--sh-1)}
+  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-md);padding:3px;gap:2px}
+  .segbtn{background:none;border:none;color:var(--muted);padding:6px 13px;border-radius:var(--r-xs);font-size:12.5px;font-weight:500;box-shadow:none}
+  .segbtn:hover{color:var(--text);filter:none;background:none;box-shadow:none}
+  .segbtn.on{background:var(--panel);color:var(--accent);box-shadow:var(--sh-1)}
   html[data-theme="dark"] .segbtn.on{background:var(--elev)}
 
-  /* ---------- tables ---------- */
+  /* ============================================================
+     表格
+     ============================================================ */
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--border);vertical-align:middle}
-  th{color:var(--muted);font-weight:600;font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.04em}
-  tbody tr{transition:background .12s var(--ease)}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;background:var(--panel)}
+  tbody tr{transition:background var(--t-fast) var(--ease)}
   tbody tr:hover{background:var(--hover)}
   tbody tr:last-child td{border-bottom:none}
   td.mono{font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--text2)}
   .ops{white-space:nowrap;display:flex;gap:5px;align-items:center}
   .ops.r{justify-content:flex-end}
-  th.ar,td.ar{text-align:right}
-  .empty{padding:44px 10px;text-align:center;color:var(--muted);font-size:13px}
-  .empty svg{width:30px;height:30px;margin-bottom:10px;opacity:.5}
+  th.ar,td.ar{text-align:right;font-variant-numeric:tabular-nums}
+  .empty{padding:46px 10px;text-align:center;color:var(--muted);font-size:13px;line-height:1.7}
+  .empty svg{width:30px;height:30px;margin-bottom:10px;opacity:.45}
   .tname{display:flex;align-items:center;gap:9px;min-width:0}
   .tname>div{min-width:0}
   .tname b{font-weight:600;white-space:nowrap}
   .tname .sub{font-size:11.5px;color:var(--muted);display:block;font-weight:400;margin-top:2px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .quota{display:flex;align-items:center;gap:8px;min-width:130px}
-  .progress{flex:1;height:6px;background:var(--input);border-radius:4px;overflow:hidden;border:1px solid var(--border)}
-  .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:4px;transition:width .3s var(--ease)}
+  .progress{flex:1;height:6px;background:var(--input);border-radius:var(--r-pill);overflow:hidden;border:1px solid var(--border)}
+  .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:var(--r-pill);transition:width .3s var(--ease)}
   .progress i.bad{background:var(--bad)}
   .progress i.warn{background:var(--warn)}
   .pager{display:flex;justify-content:center;padding:14px 0 0}
@@ -193,94 +248,121 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .nowrap{white-space:nowrap}
   .sub{font-size:11.5px;color:var(--muted);display:block;margin-top:2px;font-weight:400}
   .url{font-family:var(--mono);font-size:12px;color:var(--text2);display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .phead{display:flex;gap:8px;font-size:11.5px;color:var(--muted);padding:0 0 7px;text-transform:uppercase;letter-spacing:.04em}
+  .phead{display:flex;gap:8px;font-size:11.5px;color:var(--muted);padding:0 0 7px;text-transform:uppercase;letter-spacing:.05em}
   .phead span{flex:1}
   .phead span:last-child{flex:0 0 34px;width:34px}
 
-  /* ---------- switch ---------- */
+  /* ============================================================
+     开关
+     ============================================================ */
   .switch{position:relative;display:inline-block;width:36px;height:21px;flex-shrink:0}
   .switch input{display:none}
-  .switch span{position:absolute;inset:0;background:var(--border2);border-radius:11px;transition:.2s var(--ease);cursor:pointer}
+  .switch span{position:absolute;inset:0;background:var(--border2);border-radius:var(--r-pill);transition:.2s var(--ease);cursor:pointer}
   .switch span:before{content:'';position:absolute;width:15px;height:15px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s var(--ease);box-shadow:0 1px 3px rgba(0,0,0,.3)}
   .switch input:checked+span{background:var(--accent)}
   .switch input:checked+span:before{left:18px}
+  .switch:hover span{filter:brightness(1.08)}
 
-  /* ---------- kv / detail ---------- */
+  /* ============================================================
+     键值 / 详情 / 代码
+     ============================================================ */
   .kv{display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13.5px}
   .kv:last-child{border-bottom:none}
   .kv span{color:var(--muted)}
   .good{color:var(--ok)} .bad{color:var(--bad)} .muted{color:var(--muted)} .warnc{color:var(--warn)}
-  pre.detail{background:var(--input);border:1px solid var(--border2);padding:14px;border-radius:var(--radius-sm);overflow:auto;max-height:440px;font-size:12px;line-height:1.65;font-family:var(--mono);margin:0;white-space:pre-wrap;word-break:break-all}
-  code{background:var(--panel2);border:1px solid var(--border);padding:1px 6px;border-radius:5px;font-size:12px;font-family:var(--mono);color:var(--accent)}
+  pre.detail{background:var(--input);border:1px solid var(--border2);padding:14px;border-radius:var(--r-sm);overflow:auto;max-height:440px;font-size:12px;line-height:1.7;font-family:var(--mono);margin:0;white-space:pre-wrap;word-break:break-all}
+  code{background:var(--panel2);border:1px solid var(--border);padding:1px 6px;border-radius:var(--r-xs);font-size:12px;font-family:var(--mono);color:var(--accent)}
 
-  /* ---------- chart ---------- */
-  .chart-wrap{width:100%;overflow:hidden}
+  /* ============================================================
+     图表
+     ============================================================ */
+  .chart-wrap{width:100%;overflow:hidden;position:relative}
   .chart{width:100%;height:auto;display:block;overflow:visible}
-  .chart .gl{stroke:var(--grid);stroke-width:1}
+  .chart .gl{stroke:var(--grid);stroke-width:1;stroke-dasharray:4 4}
   .chart .axis{fill:var(--muted);font-size:10.5px;font-family:var(--font)}
   .chart .ln{fill:none;stroke:var(--accent);stroke-width:2.2;stroke-linejoin:round;stroke-linecap:round}
-  .chart .dot{fill:var(--panel);stroke:var(--accent);stroke-width:2}
-  .chart .gs1{stop-color:var(--accent);stop-opacity:.32}
+  .chart .ar{pointer-events:none}
+  .chart .dot{fill:var(--panel);stroke:var(--accent);stroke-width:2;transition:r var(--t-fast) var(--ease)}
+  .chart .hot{fill:transparent;cursor:crosshair}
+  .chart .xhair{stroke:var(--accent);stroke-width:1;stroke-dasharray:3 3;opacity:0;transition:opacity var(--t-fast) var(--ease)}
+  .chart .fdot{fill:var(--accent);stroke:var(--panel);stroke-width:2.5;opacity:0;pointer-events:none}
+  .chart .gs1{stop-color:var(--accent);stop-opacity:.30}
   .chart .gs2{stop-color:var(--accent);stop-opacity:0}
+  .ctip{position:absolute;pointer-events:none;background:var(--elev);border:1px solid var(--border2);border-radius:var(--r-sm);padding:7px 11px;font-size:12px;box-shadow:var(--sh-2);white-space:nowrap;display:none;z-index:5;line-height:1.55}
+  .ctip b{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
-  /* ---------- health list ---------- */
+  /* ============================================================
+     渠道健康列表
+     ============================================================ */
   .hrow{display:flex;align-items:center;gap:11px;padding:11px 2px;border-bottom:1px solid var(--border)}
   .hrow:last-child{border-bottom:none}
   .hmain{flex:1;min-width:0}
-  .hmain b{display:block;font-size:13.5px}
+  .hmain b{display:block;font-size:13.5px;font-weight:600}
   .hmain span{font-size:11.5px;color:var(--muted);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
 
-  /* ---------- modal / toast / login ---------- */
-  .modal-overlay{position:fixed;inset:0;background:rgba(3,7,16,.62);backdrop-filter:blur(3px);display:none;align-items:flex-start;justify-content:center;z-index:60;padding:5vh 16px;overflow:auto}
+  /* ============================================================
+     弹窗 / Toast / 登录
+     ============================================================ */
+  .modal-overlay{position:fixed;inset:0;background:rgba(3,7,16,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:none;align-items:flex-start;justify-content:center;z-index:60;padding:5vh 16px;overflow:auto}
   .modal-overlay.on{display:flex}
-  .modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:22px;width:min(620px,94vw);box-shadow:var(--shadow);animation:pop .2s var(--ease)}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:var(--r-xl);padding:22px;width:min(620px,94vw);box-shadow:var(--sh-3);animation:pop .22s var(--ease-out)}
   .modal.sm{width:min(420px,94vw)}
   .modal.lg{width:min(880px,95vw)}
-  @keyframes pop{from{opacity:0;transform:translateY(10px) scale(.99)}to{opacity:1;transform:none}}
-  .modal h3{margin:0 0 4px;font-size:16px}
-  .modal .msub{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+  @keyframes pop{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+  .modal h3{margin:0 0 4px;font-size:16px;font-weight:650}
+  .modal .msub{color:var(--muted);font-size:12.5px;margin:0 0 14px;line-height:1.6}
   .maprow,.hdrrow,.prow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
   .maprow input,.hdrrow input,.prow input{flex:1;font-family:var(--mono);font-size:12px}
   #toasts{position:fixed;right:20px;bottom:20px;z-index:99;display:flex;flex-direction:column;gap:9px;max-width:min(370px,90vw)}
-  .toast{background:var(--elev);border:1px solid var(--border);border-left:3px solid var(--accent);padding:12px 15px;border-radius:9px;font-size:13px;box-shadow:var(--shadow);transition:opacity .3s,transform .3s;animation:slide .25s var(--ease)}
+  .toast{background:var(--elev);border:1px solid var(--border);border-left:3px solid var(--accent);padding:12px 15px;border-radius:var(--r-md);font-size:13px;box-shadow:var(--sh-2);transition:opacity .3s,transform .3s;animation:slide .26s var(--ease-out);display:flex;align-items:flex-start;gap:9px;line-height:1.55}
+  .toast .ticon{flex-shrink:0;font-weight:700;line-height:1.5}
   @keyframes slide{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
-  .toast.ok{border-left-color:var(--ok)} .toast.bad{border-left-color:var(--bad)}
+  .toast.ok{border-left-color:var(--ok)} .toast.ok .ticon{color:var(--ok)}
+  .toast.bad{border-left-color:var(--bad)} .toast.bad .ticon{color:var(--bad)}
   .toast.out{opacity:0;transform:translateX(24px)}
-  .login-overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:radial-gradient(1100px 620px at 50% 12%,var(--accent-soft) 0%,var(--bg) 62%)}
+  .login-overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:radial-gradient(1100px 620px at 50% 10%,var(--accent-soft) 0%,var(--bg) 62%);padding:20px}
   .login-overlay.on{display:flex}
-  .login-card{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:36px 34px;width:min(410px,92vw);text-align:center;box-shadow:var(--shadow)}
-  .login-card .logo{margin:0 auto 16px;width:50px;height:50px;font-size:18px;border-radius:14px}
-  .login-card h2{margin:0 0 6px;font-size:18px}
+  .login-overlay::before{content:'';position:absolute;inset:0;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:44px 44px;mask-image:radial-gradient(620px 460px at 50% 34%,#000 0%,transparent 78%);-webkit-mask-image:radial-gradient(620px 460px at 50% 34%,#000 0%,transparent 78%);opacity:.6;pointer-events:none}
+  .login-card{position:relative;background:var(--panel);border:1px solid var(--border);border-radius:var(--r-xl);padding:36px 34px;width:min(410px,92vw);text-align:center;box-shadow:var(--sh-3);animation:pop .3s var(--ease-out)}
+  .login-card .logo{margin:0 auto 16px;width:52px;height:52px;border-radius:15px}
+  .login-card .logo svg{width:27px;height:27px}
+  .login-card h2{margin:0 0 6px;font-size:18px;font-weight:650;letter-spacing:.1px}
   .login-card p{color:var(--muted);font-size:12.5px;margin:0 0 20px;line-height:1.6}
   .login-card input{margin-bottom:11px;text-align:center}
   .login-card button{width:100%}
-  .login-tip{margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.6}
-  .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:8px;padding:9px 11px;text-align:left}
+  .login-tip{margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.65}
+  .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:var(--r-sm);padding:9px 11px;text-align:left}
 
-  /* ---------- help ---------- */
-  .help h4{margin:20px 0 8px;font-size:14px}
+  /* ============================================================
+     使用说明
+     ============================================================ */
+  .help h4{margin:20px 0 8px;font-size:14px;font-weight:650}
   .help h4:first-of-type{margin-top:6px}
   .help p,.help li{font-size:13px;line-height:1.9;color:var(--text2)}
   .help ol,.help ul{padding-left:20px;margin:6px 0}
   .help li{margin:3px 0}
-  .skeleton{height:14px;border-radius:6px;background:linear-gradient(90deg,var(--panel2),var(--hover),var(--panel2));background-size:200% 100%;animation:sk 1.2s infinite}
+  .skeleton{height:14px;border-radius:var(--r-xs);background:linear-gradient(90deg,var(--skeleton-a),var(--skeleton-b),var(--skeleton-a));background-size:200% 100%;animation:sk 1.2s infinite}
+  @keyframes sk{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
-  /* ---------- 专业细节：焦点环 / 环比徽章 / 动效偏好 ---------- */
-  :where(button,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  /* ============================================================
+     专业细节：焦点环 / 环比徽章 / 动效偏好
+     ============================================================ */
+  :where(button,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-xs)}
   @media (prefers-reduced-motion: reduce){
     *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
   }
-  .delta{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;margin-left:8px;vertical-align:2px;font-family:var(--mono)}
+  .delta{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:var(--r-pill);margin-left:8px;vertical-align:2px;font-family:var(--mono);flex-shrink:0}
   .delta.up{color:var(--ok);background:var(--ok-soft)}
   .delta.down{color:var(--bad);background:var(--bad-soft)}
   .delta.flat{color:var(--muted);background:var(--panel2);border:1px solid var(--border)}
-  .chart-wrap{position:relative}
-  .ctip{position:absolute;pointer-events:none;background:var(--elev);border:1px solid var(--border2);border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap;display:none;z-index:5}
-  .ctip b{font-family:var(--mono)}
-  @keyframes sk{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
-  @media (max-width:1024px){
+  /* ============================================================
+     响应式
+     ============================================================ */
+  @media (max-width:1180px){
     .stats{grid-template-columns:1fr 1fr}
+  }
+  @media (max-width:1024px){
     .grid2{grid-template-columns:1fr}
   }
   @media (max-width:860px){
@@ -288,15 +370,16 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .app{flex-direction:column}
     .sidebar{width:100%;height:auto;position:static}
     .brand{padding:0 16px}
-    .nav{flex-direction:row;overflow-x:auto;padding:10px}
+    .nav{flex-direction:row;overflow-x:auto;padding:10px;gap:4px}
     .navsec{display:none}
     .navbtn{white-space:nowrap;width:auto}
+    .navbtn.on::before{display:none}
     .side-foot{flex-direction:row;align-items:center}
     .side-row{padding:0}
     .side-row .grow{display:none}
     .stats{grid-template-columns:1fr}
     .grid{grid-template-columns:1fr}
-    .content{padding:16px var(--gutter) 40px}
+    .content{padding:16px var(--gutter) 44px}
     .topbar-in{padding:0 var(--gutter)}
     .topbar p{display:none}
   }
@@ -306,7 +389,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
 <div class="login-overlay on" id="login">
   <div class="login-card">
-    <div class="logo">OG</div>
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg></div>
     <h2>OneAPI Gateway</h2>
     <p>请输入 Admin Key 以进入管理控制台</p>
     <input id="ak" type="password" placeholder="Admin Key" autocomplete="off">
@@ -318,7 +401,10 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 
 <div class="app">
   <aside class="sidebar">
-    <div class="brand"><div class="logo">OG</div><div><b>OneAPI Gateway</b><span>管理控制台</span></div></div>
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg></div>
+      <div><b>OneAPI Gateway</b><span>管理控制台</span></div>
+    </div>
     <nav class="nav">
       <div class="navsec">监控</div>
       <button class="navbtn on" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>概览</button>
@@ -332,9 +418,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     </nav>
     <div class="side-foot">
       <div class="side-row">
-        <div class="grow"><b>v2.0.0</b>数据存储于 Cloudflare R2</div>
-        <button class="icon-btn" id="btnTheme" title="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
-        <button class="icon-btn" data-act="logout" title="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg></button>
+        <div class="grow"><b>v2.0.0</b>Cloudflare R2 存储</div>
+        <button class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+        <button class="icon-btn" data-act="logout" title="退出登录" aria-label="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg></button>
       </div>
     </div>
   </aside>
@@ -344,7 +430,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <div><h2 id="pageTitle">概览</h2><p id="pageDesc">网关运行状态与用量趋势</p></div>
         <div class="right">
           <span class="pill" id="connPill"><span class="dt"></span>未连接</span>
-          <button class="icon-btn" id="btnRefresh" title="刷新数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
+          <button class="icon-btn" id="btnRefresh" title="刷新数据" aria-label="刷新数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button>
         </div>
       </div>
     </div>
@@ -423,9 +509,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <section id="t-logs" class="tab">
         <div class="card">
           <div class="toolbar">
-            <button class="icon-btn" data-act="log-prev" title="前一天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></svg></button>
+            <button class="icon-btn" data-act="log-prev" title="前一天" aria-label="前一天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></svg></button>
             <input type="date" id="logDate" style="width:auto">
-            <button class="icon-btn" data-act="log-next" title="后一天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></button>
+            <button class="icon-btn" data-act="log-next" title="后一天" aria-label="后一天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></button>
             <button class="ghost sm" data-act="log-today">今天</button>
             <select id="logOk" class="sel"><option value="">全部结果</option><option value="ok">仅成功</option><option value="fail">仅失败</option></select>
             <select id="logStream" class="sel"><option value="">全部类型</option><option value="1">流式</option><option value="0">非流式</option></select>
@@ -836,13 +922,46 @@ document.querySelectorAll('.navbtn').forEach(function(b){
 });
 
 /* ---------- 图表 ---------- */
+/**
+ * 单调三次样条（Fritsch–Carlson）路径。
+ * 直接把折线连成直线会有明显折角，观感廉价；普通 Catmull-Rom 又会在尖峰处过冲，
+ * 把「0 请求」的那天画到负值。这里用单调样条：曲线平滑，且不会越过数据点的上下界。
+ */
+function smoothPath(pts){
+  var n = pts.length;
+  if(n === 0) return '';
+  if(n === 1) return 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+  if(n === 2) return 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1) + ' L' + pts[1].x.toFixed(1) + ',' + pts[1].y.toFixed(1);
+  var dx = [], dy = [], slope = [], m = [], i;
+  for(i = 0; i < n - 1; i++){ dx[i] = pts[i+1].x - pts[i].x; dy[i] = pts[i+1].y - pts[i].y; }
+  for(i = 0; i < n - 1; i++) slope[i] = dx[i] === 0 ? 0 : dy[i] / dx[i];
+  m[0] = slope[0]; m[n-1] = slope[n-2];
+  for(i = 1; i < n - 1; i++){
+    m[i] = (slope[i-1] * slope[i] <= 0) ? 0 : (slope[i-1] + slope[i]) / 2;
+  }
+  // 限制切线幅值，保证单调性（不过冲）
+  for(i = 0; i < n - 1; i++){
+    if(slope[i] === 0){ m[i] = 0; m[i+1] = 0; continue; }
+    var a = m[i] / slope[i], b = m[i+1] / slope[i];
+    var s = a * a + b * b;
+    if(s > 9){ var t = 3 / Math.sqrt(s); m[i] = t * a * slope[i]; m[i+1] = t * b * slope[i]; }
+  }
+  var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+  for(i = 0; i < n - 1; i++){
+    var x1 = pts[i].x + dx[i] / 3, y1 = pts[i].y + m[i] * dx[i] / 3;
+    var x2 = pts[i+1].x - dx[i] / 3, y2 = pts[i+1].y - m[i+1] * dx[i] / 3;
+    d += ' C' + x1.toFixed(1) + ',' + y1.toFixed(1) + ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) +
+      ' ' + pts[i+1].x.toFixed(1) + ',' + pts[i+1].y.toFixed(1);
+  }
+  return d;
+}
 function chartSvg(series, opts){
   opts = opts || {};
-  var w = 780, h = 210, padL = 50, padR = 16, padT = 16, padB = 30;
+  var w = 820, h = 220, padL = 54, padR = 18, padT = 18, padB = 30;
   var iw = w - padL - padR, ih = h - padT - padB;
   var max = 0;
   series.forEach(function(p){ if(p.value > max) max = p.value; });
-  max = max > 0 ? max * 1.18 : 1;
+  max = max > 0 ? max * 1.15 : 1;
   var n = series.length;
   var fmt = opts.fmt || fmtShort;
   function X(i){ return n > 1 ? padL + i * (iw / (n - 1)) : padL + iw / 2; }
@@ -851,40 +970,44 @@ function chartSvg(series, opts){
   for(var k = 0; k <= 4; k++){
     var gy = padT + ih - (k / 4) * ih;
     grid += '<line class="gl" x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (w - padR) + '" y2="' + gy.toFixed(1) + '"/>';
-    grid += '<text class="axis" x="' + (padL - 10) + '" y="' + (gy + 3.5).toFixed(1) + '" text-anchor="end">' + esc(fmt(max * k / 4)) + '</text>';
+    grid += '<text class="axis" x="' + (padL - 12) + '" y="' + (gy + 3.5).toFixed(1) + '" text-anchor="end">' + esc(fmt(max * k / 4)) + '</text>';
   }
   var line = '', area = '', xlabels = '', dots = '';
   if(n > 0){
-    var pts = series.map(function(p, i){ return X(i).toFixed(1) + ',' + Y(p.value).toFixed(1); });
-    line = 'M' + pts.join(' L');
-    area = line + ' L' + X(n - 1).toFixed(1) + ',' + (padT + ih) + ' L' + X(0).toFixed(1) + ',' + (padT + ih) + ' Z';
+    var pts = series.map(function(p, i){ return { x: X(i), y: Y(p.value) }; });
+    line = smoothPath(pts);
+    area = line + ' L' + pts[n-1].x.toFixed(1) + ',' + (padT + ih) + ' L' + pts[0].x.toFixed(1) + ',' + (padT + ih) + ' Z';
     var step = Math.max(1, Math.ceil(n / 8));
     series.forEach(function(p, i){
       if(i % step === 0 || i === n - 1)
         xlabels += '<text class="axis" x="' + X(i).toFixed(1) + '" y="' + (h - 9) + '" text-anchor="middle">' + esc(p.label) + '</text>';
     });
-    if(n <= 40){
+    if(n <= 60){
       dots = series.map(function(p, i){
-        return '<circle class="dot" cx="' + X(i).toFixed(1) + '" cy="' + Y(p.value).toFixed(1) + '" r="3"><title>' + esc(p.label + ' · ' + fmt(p.value)) + '</title></circle>' +
-          '<circle class="hot" data-i="' + i + '" cx="' + X(i).toFixed(1) + '" cy="' + Y(p.value).toFixed(1) + '" r="11" fill="transparent" style="cursor:crosshair"/>';
+        return '<circle class="dot" cx="' + pts[i].x.toFixed(1) + '" cy="' + pts[i].y.toFixed(1) + '" r="3"><title>' + esc(p.label + ' · ' + fmt(p.value)) + '</title></circle>' +
+          '<circle class="hot" data-i="' + i + '" cx="' + pts[i].x.toFixed(1) + '" cy="' + pts[i].y.toFixed(1) + '" r="12"/>';
       }).join('');
     }
   }
   var gid = 'agrad';
-  return '<svg class="chart" viewBox="0 0 ' + w + ' ' + h + '">' +
+  return '<svg class="chart" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="用量趋势图">' +
     '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">' +
     '<stop class="gs1" offset="0"/><stop class="gs2" offset="1"/></linearGradient></defs>' +
     grid +
     '<path class="ar" fill="url(#' + gid + ')" d="' + area + '"/>' +
-    '<line class="ln" x1="0" y1="0" x2="0" y2="0" stroke="none"/>' +
-    '<path class="ln" d="' + line + '"/>' + dots + xlabels + '</svg>';
+    '<path class="ln" d="' + line + '"/>' +
+    '<line class="xhair" x1="0" y1="' + padT + '" x2="0" y2="' + (padT + ih) + '" style="opacity:0"/>' +
+    '<circle class="fdot" cx="0" cy="0" r="4.5" style="opacity:0"/>' +
+    dots + xlabels + '</svg>';
 }
 
 /* ---------- 概览 ---------- */
 function statCard(o){
-  return '<div class="stat"><div class="top"><span class="label">' + esc(o.label) + '</span>' +
-    '<span class="ic ' + (o.tone || '') + '">' + (o.icon || '') + '</span></div>' +
-    '<div class="num">' + o.value + (o.delta || '') + '</div><div class="sub">' + o.sub + '</div></div>';
+  return '<div class="stat">' +
+    '<div class="stat-h"><span class="ic ' + (o.tone || '') + '">' + (o.icon || '') + '</span>' +
+    '<span class="label">' + esc(o.label) + '</span></div>' +
+    '<div class="num">' + o.value + (o.delta || '') + '</div>' +
+    '<div class="sub">' + o.sub + '</div></div>';
 }
 /* 环比徽章：当前周期 vs 上一周期同长度窗口，↑绿 ↓红 →灰；上一周期无数据则不显示 */
 function deltaBadge(curr, prev){
@@ -931,7 +1054,7 @@ function renderTrend(){
     : '<div class="empty">' + I.inbox + '<div>暂无统计数据，发起一次请求后即可看到趋势</div></div>';
   bindChartTip();
 }
-/* 趋势图悬浮提示：鼠标悬停数据点热区时，浮层显示完整日期与该日数值 */
+/* 趋势图悬浮：十字准星 + 焦点圆点 + 浮层。鼠标离开时统一收起，避免残影 */
 function bindChartTip(){
   var wrap = $('trendChart');
   var svg = wrap ? wrap.querySelector('svg.chart') : null;
@@ -940,26 +1063,37 @@ function bindChartTip(){
   var tip = document.createElement('div');
   tip.className = 'ctip';
   wrap.appendChild(tip);
+  var xhair = svg.querySelector('.xhair');
+  var fdot = svg.querySelector('.fdot');
+  function hide(){
+    tip.style.display = 'none';
+    if(xhair) xhair.style.opacity = 0;
+    if(fdot) fdot.style.opacity = 0;
+  }
   svg.addEventListener('mousemove', function(e){
     var hot = e.target && e.target.classList && e.target.classList.contains('hot') ? e.target : null;
-    if(!hot){ tip.style.display = 'none'; return; }
+    if(!hot){ hide(); return; }
     var i = parseInt(hot.getAttribute('data-i'), 10);
     var days = (S.stats && S.stats.days) || [];
     var p = days[i] || null;
-    if(!p){ tip.style.display = 'none'; return; }
+    if(!p){ hide(); return; }
+    var cx = parseFloat(hot.getAttribute('cx'));
+    var cy = parseFloat(hot.getAttribute('cy'));
+    if(xhair){ xhair.setAttribute('x1', cx); xhair.setAttribute('x2', cx); xhair.style.opacity = .8; }
+    if(fdot){ fdot.setAttribute('cx', cx); fdot.setAttribute('cy', cy); fdot.style.opacity = 1; }
     var v = Number(p[METRIC] || 0);
     var txt = METRIC === 'cost' ? '$' + fmtCost(v) : (METRIC === 'tokens' ? fmtNum(v) + ' Tokens' : fmtNum(v) + ' 次请求');
     tip.innerHTML = esc(p.date) + '<br><b>' + txt + '</b>';
     var wr = wrap.getBoundingClientRect();
     var vb = svg.viewBox && svg.viewBox.baseVal;
-    if(!vb){ tip.style.display = 'none'; return; }
-    var x = (parseFloat(hot.getAttribute('cx')) / vb.width) * wr.width;
-    var y = (parseFloat(hot.getAttribute('cy')) / vb.height) * wr.height;
+    if(!vb){ hide(); return; }
+    var x = (cx / vb.width) * wr.width;
+    var y = (cy / vb.height) * wr.height;
     tip.style.display = 'block';
     tip.style.left = Math.min(Math.max(0, wr.width - 140), Math.max(0, x + 12)) + 'px';
-    tip.style.top = Math.max(0, y - 48) + 'px';
+    tip.style.top = Math.max(0, y - 52) + 'px';
   });
-  svg.addEventListener('mouseleave', function(){ tip.style.display = 'none'; });
+  svg.addEventListener('mouseleave', hide);
 }
 function renderOverview(){
   var html = '';

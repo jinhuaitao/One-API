@@ -161,8 +161,8 @@ npm run deploy   # 先 ensure-r2 再 wrangler deploy
 ### 测试与预览
 
 ```bash
-npm test         # 冒烟测试：内存版 R2 + 模拟上游，覆盖 53 项断言，无需任何依赖
-npm run test:stream   # 流式（SSE）回归测试：9 组场景 / 30 项断言，无需任何依赖
+npm test         # 冒烟测试：内存版 R2 + 模拟上游，覆盖 43 项断言，无需任何依赖
+npm run test:stream   # 流式（SSE）回归测试：5 组场景 / 22 项断言，无需任何依赖
 npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制台静态预览）
 ```
 
@@ -174,6 +174,8 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
   补发 `[DONE]`、Anthropic 翻译与 ping 保活等。改动流式相关代码后请务必跑一遍。
 - `npm run preview` 生成的是**纯静态预览页**，数据全部本地模拟，
   不会连接真实网关，也不会写入任何地方；用浏览器直接打开即可查看完整界面。
+  预览页支持 `?tab=channels|keys|logs|settings` 直接跳到指定页面、
+  `?theme=dark|light` 指定主题，便于逐屏截图比对。
 
 ## 接口说明
 
@@ -268,6 +270,11 @@ npm run preview  # 生成 preview/admin-preview.html（带模拟数据的控制�
   密钥用量（`used_tokens`）与后台编辑共用同一把锁，编辑不会被并发请求覆盖。
 - **日志列表为什么天然按时间倒序**：日志对象名使用「倒序时间戳」，R2 按 key 升序返回即最新在前，
   因此翻页游标天然指向更早的一页。
+- **改了渠道/密钥后，为什么说「立即生效」**：网关对 `channels.json` / `keys.json` 做了
+  热路径短 TTL 缓存（渠道 3 秒、密钥 1 秒），用来省掉每次 `/v1/*` 请求的 R2 往返；
+  **控制台保存时会主动失效缓存**，所以在后台改完立刻生效。
+  只有绕过控制台直接改 R2 的场景，才会有一个窗口（最多 3 秒）的延迟。
+  密钥用量是「读-改-写」，因此不受缓存影响，每次成功请求都会读到最新值。
 - **Anthropic 渠道注意事项**：
   - 仅支持 `POST /v1/chat/completions`（`completions` / `embeddings` 不会路由到 Anthropic 渠道）；
   - `max_tokens` 必需：优先用请求中的 `max_tokens`，否则用渠道的「默认 max_tokens」（默认 4096）；

@@ -161,6 +161,37 @@ function withLock(name, fn) {
   return run;
 }
 
+/**
+ * 热路径短 TTL 缓存。
+ *
+ * /v1/* 的每次代理请求都要读 channels.json（选渠道）与 keys.json（鉴权 + 配额），
+ * 但这两份数据极少变动。未缓存时每个请求固定要多付 2 次 R2 往返，
+ * 直接体现在首字节延迟上（上游再快也白搭）。
+ *
+ * 缓存窗口取得很短（渠道 3s / 密钥 1s），并且管理后台的保存接口会主动失效，
+ * 因此「在控制台改完立刻生效」的语义不受影响；只有绕过控制台直接改 R2 的场景
+ * 才会有最多一个窗口的延迟，这对本项目的使用方式是可接受的。
+ */
+const hotCache = new Map(); // r2 key -> { at, value }
+
+async function cachedJson(env, key, fallback, ttlMs) {
+  const now = Date.now();
+  const hit = hotCache.get(key);
+  if (hit && now - hit.at < (ttlMs || 2000)) return hit.value;
+  const value = await r2GetJson(env, key, fallback);
+  hotCache.set(key, { at: now, value });
+  return value;
+}
+
+function invalidateCache(...keys) {
+  for (const k of keys) hotCache.delete(k);
+}
+
+/** 渠道配置的缓存窗口（路由用；变更极少，可以放宽一点） */
+const CHANNELS_TTL_MS = 3000;
+/** 密钥的缓存窗口（鉴权 + 配额，安全相关，取更短的窗口） */
+const KEYS_TTL_MS = 1000;
+
 /* ---------------- 设置 ---------------- */
 
 function defaultSettings() {
@@ -377,7 +408,9 @@ async function authApiKey(env, request, settings) {
     }
     return { ok: true, admin: true, name: 'admin', record: null };
   }
-  const keys = await r2GetJson(env, KEYS_KEY, []);
+  // 走短 TTL 缓存：密钥校验是每个 /v1/* 请求的必经步骤，省下这次 R2 往返很值。
+  // 控制台保存密钥会主动失效缓存，所以「禁用后立即生效」不受影响。
+  const keys = await cachedJson(env, KEYS_KEY, [], KEYS_TTL_MS);
   const rec = keys.find((k) => k.key === token);
   if (!rec) {
     return { ok: false, res: err('无效的 API Key', 401, 'invalid_key') };
@@ -809,6 +842,10 @@ function anthropicStreamToOpenAI(
   const transform = new TransformStream({
     transform(bytes, controller) {
       buffer += decoder.decode(bytes, { stream: true });
+      // 容忍 CRLF：部分 Anthropic 兼容中转（套一层的网关）会输出 \r\n，
+      // 只按 \n\n 切分会永远拼不出一个完整事件，表现为「流式翻译零输出」。
+      // 对整个缓冲区做替换，因此 \r 与 \n 落在两个分片里也能正确合并。
+      if (buffer.indexOf('\r') >= 0) buffer = buffer.replace(/\r\n/g, '\n');
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx);
@@ -924,7 +961,14 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
   let closed = false;
   let bytesOut = 0;
   let gotFirst = false;
+  let lastOutAt = 0;
   let controllerRef = null; // start() 里赋值，供保活定时器向下游写注释用
+  // 保活定时器的检查周期：约 keepaliveMs / 4，并夹在 [50ms, keepaliveMs] 之间。
+  // 上界保证注释下发时刻不会比配置的间隔更晚；下界避免极小配置把 isolate 唤醒成空转。
+  const KA_TICK =
+    keepaliveMs > 0
+      ? Math.min(Math.max(50, Math.floor(keepaliveMs / 4)), Math.max(50, keepaliveMs))
+      : 0;
 
   const meta = () => ({ bytes: bytesOut, first_byte: gotFirst });
 
@@ -973,38 +1017,44 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
     );
   };
 
-  /** 武装下游保活：每 keepaliveMs 检查一次，期间没有向调用方写过字节就补一条 SSE 注释 */
+  /** 武装下游保活：常驻定时器 + 时间戳比较。
+   *
+   *  原实现每向调用方写一个 chunk 都要 clearInterval + setInterval，
+   *  一次长回答上千个 chunk 就是上千次定时器创建 / 销毁 —— 这些开销都记在
+   *  Workers 的 CPU 时间里，而免费版只有 10ms。改成常驻定时器后，写路径
+   *  只更新一个时间戳，定时器数量恒定为 1，对外语义（超过 keepaliveMs
+   *  没下发任何字节就补一条 SSE 注释）完全不变。 */
   const armKa = () => {
-    if (!keepaliveMs || closed) return;
-    if (kaTimer) clearInterval(kaTimer);
+    if (!keepaliveMs || kaTimer || closed) return;
+    lastOutAt = Date.now();
     kaTimer = setInterval(() => {
       if (closed) {
         clearKa();
         return;
       }
+      if (Date.now() - lastOutAt < keepaliveMs) return;
       try {
         controllerRef.enqueue(encoder.encode(': ka\n\n'));
         bytesOut += 6;
+        lastOutAt = Date.now();
       } catch {
         closed = true;
         clearKa();
       }
-    }, keepaliveMs);
+    }, KA_TICK);
   };
 
-  /** 向调用方下发字节的统一入口：统计字节数，并在每次写入后重新武装下游保活 */
+  /** 向调用方下发字节的统一入口：统计字节数并刷新「最后下发时刻」，供保活定时器判断 */
   const out = (controller, bytes) => {
     if (closed) return;
     try {
       controller.enqueue(bytes);
       bytesOut += bytes.byteLength;
+      lastOutAt = Date.now();
     } catch {
       closed = true;
       clearKa();
-      return;
     }
-    clearKa();
-    armKa();
   };
 
   return new ReadableStream({
@@ -1358,6 +1408,11 @@ async function bumpKeyUsage(env, auth, tokens, cost) {
         rec.used_cost = round8((rec.used_cost || 0) + (cost || 0));
         rec.last_used_at = nowIso();
         await r2PutJson(env, KEYS_KEY, keys);
+        // 顺手把热缓存指向刚写回的最新数组：这样紧接着的鉴权请求看到的
+        // 就是含本次用量的数据，配额判断不会因为缓存而滞后。
+        // 只替换值、保留原 at，因此不会变相延长 TTL。
+        const hit = hotCache.get(KEYS_KEY);
+        if (hit) hotCache.set(KEYS_KEY, { at: hit.at, value: keys });
       }
     });
   } catch {
@@ -1427,7 +1482,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     }
   }
 
-  const channels = await r2GetJson(env, CHANNELS_KEY, []);
+  const channels = await cachedJson(env, CHANNELS_KEY, [], CHANNELS_TTL_MS);
   const candidates = pickChannels(channels, body.model, path);
   const requestId = reqId();
   const started = Date.now();
@@ -1727,8 +1782,14 @@ async function loadStats(env, days, settings) {
   const keys = {};
   const dayList = [];
 
-  for (const date of dates) {
-    const s = (await r2GetJson(env, STATS_PREFIX + date + '.json', null)) || emptyDaily(date);
+  // 并行读取：原实现是 for + await 串行，30 天视图要等 30 次 R2 往返依次完成，
+  // 后台首屏因此慢得肉眼可见。改成一次并发拉取后，这段延迟从 O(n) 降到 O(1)。
+  const dayStats = await Promise.all(
+    dates.map((date) => r2GetJson(env, STATS_PREFIX + date + '.json', null))
+  );
+  for (let di = 0; di < dates.length; di++) {
+    const date = dates[di];
+    const s = dayStats[di] || emptyDaily(date);
     dayList.push({
       date,
       requests: s.requests || 0,
@@ -1768,9 +1829,14 @@ async function loadStats(env, days, settings) {
       streams: 0,
       streams_aborted: 0,
     };
-    for (let i = n; i < 2 * n; i++) {
-      const date = dateStr(base - i * 86400000, offset);
-      const s = (await r2GetJson(env, STATS_PREFIX + date + '.json', null)) || emptyDaily(date);
+    // 同样并行读取，避免「为了一个环比数字再多等 n 次串行往返」
+    const prevDates = [];
+    for (let i = n; i < 2 * n; i++) prevDates.push(dateStr(base - i * 86400000, offset));
+    const prevStats = await Promise.all(
+      prevDates.map((date) => r2GetJson(env, STATS_PREFIX + date + '.json', null))
+    );
+    for (const ps of prevStats) {
+      const s = ps || {};
       pt.requests += s.requests || 0;
       pt.ok += s.ok || 0;
       pt.failed += s.failed || 0;
@@ -1815,19 +1881,29 @@ function mergeBuckets(target, src) {
   }
 }
 
-/** 删除某个前缀下的全部对象（分页遍历） */
+/** 删除某个前缀下的全部对象（分页遍历 + 批量删除） */
 async function deletePrefix(env, prefix) {
   let deleted = 0;
   let cursor;
   do {
     const listed = await env.R2.list({ prefix, limit: 200, cursor });
     const keys = listed.objects.map((o) => o.key);
-    for (const k of keys) {
+    if (keys.length) {
+      // R2 的 delete 支持直接传数组（单次上限 1000），
+      // 比逐个 await 少 199 次往返 —— 清理上万条日志时差别很明显
       try {
-        await env.R2.delete(k);
-        deleted++;
+        await env.R2.delete(keys);
+        deleted += keys.length;
       } catch {
-        // 忽略单个删除失败
+        // 批量删除失败时退回逐个删除，避免一个坏 key 让整批清理失败
+        for (const k of keys) {
+          try {
+            await env.R2.delete(k);
+            deleted++;
+          } catch {
+            // 忽略单个删除失败
+          }
+        }
       }
     }
     cursor = listed.truncated ? listed.cursor : undefined;
@@ -1905,6 +1981,7 @@ async function saveChannelHealth(env, channelId, health) {
       if (idx < 0) return;
       channels[idx].health = { ...health, checked_at: nowIso() };
       await r2PutJson(env, CHANNELS_KEY, channels);
+      invalidateCache(CHANNELS_KEY);
     });
   } catch {
     // 忽略
@@ -1952,6 +2029,7 @@ async function handleAdmin(env, ctx, request) {
     }
     // 与健康巡检共用一把锁，避免刚保存的配置被并发的巡检写回覆盖
     await withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels));
+    invalidateCache(CHANNELS_KEY); // 热路径缓存立即失效，改动即时生效
     return json({ ok: true });
   }
 
@@ -1966,6 +2044,7 @@ async function handleAdmin(env, ctx, request) {
     }
     // 与用量累加共用一把锁，避免编辑被并发请求的用量写回覆盖
     await withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys));
+    invalidateCache(KEYS_KEY); // 禁用 / 改配额后立即生效，不等待 TTL
     return json({ ok: true });
   }
 
@@ -2184,7 +2263,7 @@ export default {
     if (path === '/v1/models' && request.method === 'GET') {
       const auth = await authApiKey(env, request, settings);
       if (!auth.ok) return auth.res;
-      const channels = await r2GetJson(env, CHANNELS_KEY, []);
+      const channels = await cachedJson(env, CHANNELS_KEY, [], CHANNELS_TTL_MS);
       let models = [
         ...new Set(
           channels
