@@ -220,6 +220,14 @@ function defaultSettings() {
      */
     stream_idle_timeout_ms: 60000,
     /**
+     * 流式响应的「首字节超时」（毫秒）：收到上游第一个字节之前用这个时长判定
+     * 静默，之后回落到 stream_idle_timeout_ms。长 prompt（几十 KB 上下文）在
+     * 慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，
+     * 用同一个 60s 会把「上游正在算」误判成断流。0 = 与 stream_idle_timeout_ms
+     * 相同（旧行为）。
+     */
+    stream_first_byte_ms: 120000,
+    /**
      * 流式响应的「下游保活间隔」（毫秒）：网关超过该时长没有向调用方下发任何字节时，
      * 主动补一条 SSE 注释（`: ka\n\n`）。标准 SSE 客户端会忽略注释行，
      * 但链路上的 nginx / CDN / 客户端读超时因此不会遇到「零字节窗口」，
@@ -283,6 +291,12 @@ function normalizeSettings(raw) {
     0,
     600000,
     d.stream_keepalive_ms
+  );
+  s.stream_first_byte_ms = clampInt(
+    s.stream_first_byte_ms,
+    0,
+    600000,
+    d.stream_first_byte_ms
   );
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
   s.timezone_offset_minutes = clampInt(
@@ -802,7 +816,8 @@ function anthropicStreamToOpenAI(
   model,
   onFinish = () => {},
   idleMs = 0,
-  keepaliveMs = 0
+  keepaliveMs = 0,
+  firstByteMs = 0
 ) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -815,6 +830,10 @@ function anthropicStreamToOpenAI(
   let usageSettled = false;
   const toolIndexByBlock = {};
   let toolCounter = 0;
+  // 「上游→网关」方向的活动时间戳：Anthropic 兼容渠道里 content_block_stop、
+  // 未知事件等块会被解析层静默丢弃、不向下游写出，但连接实际是活的。
+  // guardSSEStream 借它区分「上游在说话」与「上游真的断了」。
+  const activityRef = { lastUpstreamAt: Date.now() };
 
   const settleUsage = (u, finish, meta) => {
     if (usageSettled) return;
@@ -895,6 +914,7 @@ function anthropicStreamToOpenAI(
 
   const transform = new TransformStream({
     transform(bytes, controller) {
+      activityRef.lastUpstreamAt = Date.now();
       buffer += decoder.decode(bytes, { stream: true });
       // 容忍 CRLF：部分 Anthropic 兼容中转（套一层的网关）会输出 \r\n，
       // 只按 \n\n 切分会永远拼不出一个完整事件，表现为「流式翻译零输出」。
@@ -941,6 +961,8 @@ function anthropicStreamToOpenAI(
     onFinish: (reason, meta) => settleUsage(null, reason, meta),
     idleMs,
     keepaliveMs,
+    firstByteMs,
+    activityRef,
   });
 }
 
@@ -1005,7 +1027,13 @@ const isDoneBlock = (raw) => /^\s*data:\s*\[DONE\]\s*$/m.test(raw);
  *  - 诊断信息（onFinish 第二个参数）：{ bytes, first_byte }——已向调用方转发的字节数、
  *    是否收到过上游首块，用于区分「上游从没吐过字」和「吐到一半停了」。
  */
-function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
+function guardSSEStream(src, {
+  onFinish,
+  idleMs = 0,
+  keepaliveMs = 0,
+  firstByteMs = 0,
+  activityRef = null
+} = {}) {
   const encoder = new TextEncoder();
   let reader = null;
   let idleTimer = null;
@@ -1124,7 +1152,21 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
       const arm = () => {
         if (!idleMs) return;
         clearIdle();
+        // 首字节与中途静默分离：长 prompt / 慢渠道出首 token 前的排队 + 推理
+        // 远比流中途的停顿更久，统一用 idleMs 会把「上游正在算」误判成断流。
+        const wait = gotFirst ? idleMs : (firstByteMs || idleMs);
         idleTimer = setTimeout(() => {
+          // 结构性防误判：解析层（rewriteOpenAISSE / anthropicStreamToOpenAI）
+          // 可能静默丢弃非数据块（未知事件、注释行）而不向下游写出任何字节，
+          // 但「上游→网关」方向最近仍有字节到达 —— 上游活着，继续等而不是掐。
+          if (
+            activityRef &&
+            activityRef.lastUpstreamAt &&
+            Date.now() - activityRef.lastUpstreamAt < wait
+          ) {
+            arm();
+            return;
+          }
           timedOut = true;
           // 主动断开上游：挂起的 read() 会以 done 结束，随后走超时收尾
           try {
@@ -1132,7 +1174,7 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
           } catch {
             // 忽略
           }
-        }, idleMs);
+        }, wait);
       };
 
       try {
@@ -1197,7 +1239,8 @@ function rewriteOpenAISSE(
   model,
   onFinish = () => {},
   idleMs = 0,
-  keepaliveMs = 0
+  keepaliveMs = 0,
+  firstByteMs = 0
 ) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -1205,6 +1248,10 @@ function rewriteOpenAISSE(
   let usage = null;
   let settled = false;
   let sawDone = false;
+  // 「上游→网关」方向的活动时间戳：只要上游还有字节进来（哪怕最终被解析层
+  // 丢弃），就说明连接活着。guardSSEStream 借它避免把「解析层丢弃非数据块」
+  // 误判成上游断流。
+  const activityRef = { lastUpstreamAt: Date.now() };
 
   const done = (finish, meta) => {
     if (settled) return;
@@ -1221,6 +1268,7 @@ function rewriteOpenAISSE(
 
   const transform = new TransformStream({
     transform(bytes, controller) {
+      activityRef.lastUpstreamAt = Date.now();
       buffer += decoder.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n');
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
@@ -1247,6 +1295,8 @@ function rewriteOpenAISSE(
     onFinish: done,
     idleMs,
     keepaliveMs,
+    firstByteMs,
+    activityRef,
   });
 }
 
@@ -1641,14 +1691,16 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                   body.model,
                   onFinish,
                   settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms
+                  settings.stream_keepalive_ms,
+                  settings.stream_first_byte_ms
                 )
               : rewriteOpenAISSE(
                   upstream.body,
                   body.model,
                   onFinish,
                   settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms
+                  settings.stream_keepalive_ms,
+                  settings.stream_first_byte_ms
                 );
             ctx.waitUntil(
               finishPromise
