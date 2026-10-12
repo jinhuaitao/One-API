@@ -104,7 +104,7 @@ function clampNum(v, min, max, dflt) {
 /** 保留 8 位小数，避免浮点误差累积 */
 const round8 = (n) => Math.round((Number(n) || 0) * 1e8) / 1e8;
 
-/* ---------------- 渠道 API Key（支持多 Key） ---------------- */
+/* ----------------- 渠道 API Key（支持多 Key） ----------------- */
 
 /**
  * 解析渠道的 API Key：支持用英文逗号分隔多个 Key。
@@ -118,7 +118,7 @@ function channelKeys(channel) {
     .filter(Boolean);
 }
 
-/* ---------------- R2 数据层 ---------------- */
+/* ----------------- R2 数据层 ----------------- */
 
 async function r2GetJson(env, key, fallback) {
   try {
