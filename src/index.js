@@ -173,24 +173,14 @@ function withLock(name, fn) {
  * 才会有最多一个窗口的延迟，这对本项目的使用方式是可接受的。
  */
 const hotCache = new Map(); // r2 key -> { at, value }
-const hotPending = new Map(); // r2 key -> in-flight Promise：并发 miss 时同 key 只发一次 R2 读（single-flight）
 
 async function cachedJson(env, key, fallback, ttlMs) {
   const now = Date.now();
   const hit = hotCache.get(key);
   if (hit && now - hit.at < (ttlMs || 2000)) return hit.value;
-  // single-flight：冷启动瞬间多个并发请求同时 miss 时，只有第一个真正读 R2，
-  // 其余共享同一个 Promise —— 避免缓存击穿把 1 次读放大成 N 次。
-  const pending = hotPending.get(key);
-  if (pending) return pending;
-  const p = (async () => {
-    const value = await r2GetJson(env, key, fallback);
-    hotCache.set(key, { at: Date.now(), value });
-    return value;
-  })();
-  hotPending.set(key, p);
-  p.finally(() => hotPending.delete(key)).catch(() => {});
-  return p;
+  const value = await r2GetJson(env, key, fallback);
+  hotCache.set(key, { at: now, value });
+  return value;
 }
 
 function invalidateCache(...keys) {
@@ -198,7 +188,7 @@ function invalidateCache(...keys) {
 }
 
 /** 渠道配置的缓存窗口（路由用；变更极少，可以放宽一点） */
-const CHANNELS_TTL_MS = 1000;
+const CHANNELS_TTL_MS = 3000;
 /** 密钥的缓存窗口（鉴权 + 配额，安全相关，取更短的窗口） */
 const KEYS_TTL_MS = 1000;
 
@@ -242,27 +232,6 @@ function defaultSettings() {
     default_pricing: { in: 0, out: 0 },
     /** 按模型定价：{ "gpt-4o-mini": { "in": 0.15, "out": 0.6 } } */
     pricing: {},
-    /**
-     * 密钥默认 RPM（每分钟请求数）软上限：0 = 不限。
-     * 未单独设置 rpm 的密钥沿用此值；密钥自己的 rpm 优先（0 = 该 Key 不限）。
-     * 注意：Workers 无共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置值 × 实例数），
-     * 用于防单 Key 打爆上游，不是计费级强配额。
-     */
-    rpm_default: 0,
-    /**
-     * 渠道巡检失败 → Telegram 通知：填 bot token 与 chat_id 后生效。
-     * tg_notify_down：渠道由正常转异常时告警；tg_notify_up：恢复时报告（默认关，避免吵）。
-     * 通知只在巡检（控制台「全部测试」/单渠道测试）发现状态翻转时发送，频率天然受控。
-     */
-    tg_bot_token: '',
-    tg_chat_id: '',
-    tg_notify_down: true,
-    tg_notify_up: false,
-    /**
-     * R2 每日自动备份：每天首个请求把 channels/keys/settings 快照到 backup/<日期>.json，
-     * 保留最近 backup_keep_days 份（超期自动清理）。0 = 关闭自动备份。
-     */
-    backup_keep_days: 7,
   };
 }
 
@@ -294,14 +263,6 @@ function normalizeSettings(raw) {
   s.custom_models = Array.isArray(s.custom_models)
     ? s.custom_models.map((m) => String(m).trim()).filter(Boolean)
     : [];
-  // RPM 软上限与备份保留份数
-  s.rpm_default = clampInt(s.rpm_default, 0, 100000, 0);
-  s.backup_keep_days = clampInt(s.backup_keep_days, 0, 365, 7);
-  // Telegram 通知配置
-  s.tg_bot_token = String(s.tg_bot_token || '').trim();
-  s.tg_chat_id = String(s.tg_chat_id || '').trim();
-  s.tg_notify_down = s.tg_notify_down !== false;
-  s.tg_notify_up = s.tg_notify_up === true;
   const normP = (p) => ({ in: clampNum(p && p.in, 0, 1e6, 0), out: clampNum(p && p.out, 0, 1e6, 0) });
   s.default_pricing = normP(s.default_pricing);
   const pricing = {};
@@ -438,7 +399,7 @@ async function authApiKey(env, request, settings) {
       ),
     };
   }
-  if (env.ADMIN_KEY && (await safeEqual(token, env.ADMIN_KEY))) {
+  if (env.ADMIN_KEY && token === env.ADMIN_KEY) {
     if (settings && settings.allow_admin_key_as_api_key === false) {
       return {
         ok: false,
@@ -470,22 +431,7 @@ async function authApiKey(env, request, settings) {
 }
 
 /** 管理后台鉴权（/api/admin/*） */
-/** 恒定时间字符串比较：先把两侧都 SHA-256 归一到 32 字节定长，再逐字节异或。
- *  直接 === 的耗时随匹配前缀长度变化，管理接口公网可达，值得防时序侧信道。 */
-async function safeEqual(a, b) {
-  const enc = new TextEncoder();
-  const [x, y] = await Promise.all([
-    crypto.subtle.digest('SHA-256', enc.encode(String(a))),
-    crypto.subtle.digest('SHA-256', enc.encode(String(b))),
-  ]);
-  const ua = new Uint8Array(x);
-  const ub = new Uint8Array(y);
-  let diff = 0;
-  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
-  return diff === 0;
-}
-
-async function requireAdmin(env, request) {
+function requireAdmin(env, request) {
   const url = new URL(request.url);
   const key =
     request.headers.get('X-Admin-Key') || url.searchParams.get('admin_key');
@@ -499,7 +445,7 @@ async function requireAdmin(env, request) {
       ),
     };
   }
-  if (!key || !(await safeEqual(key, env.ADMIN_KEY))) {
+  if (key !== env.ADMIN_KEY) {
     return { ok: false, res: err('Admin Key 不正确', 401, 'unauthorized') };
   }
   return { ok: true };
@@ -1016,8 +962,13 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
   let bytesOut = 0;
   let gotFirst = false;
   let lastOutAt = 0;
-  let nextKaAt = 0; // 下次应发保活注释的绝对时刻；写入路径只更新它，不重排定时器
   let controllerRef = null; // start() 里赋值，供保活定时器向下游写注释用
+  // 保活定时器的检查周期：约 keepaliveMs / 4，并夹在 [50ms, keepaliveMs] 之间。
+  // 上界保证注释下发时刻不会比配置的间隔更晚；下界避免极小配置把 isolate 唤醒成空转。
+  const KA_TICK =
+    keepaliveMs > 0
+      ? Math.min(Math.max(50, Math.floor(keepaliveMs / 4)), Math.max(50, keepaliveMs))
+      : 0;
 
   const meta = () => ({ bytes: bytesOut, first_byte: gotFirst });
 
@@ -1040,7 +991,7 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
 
   const clearKa = () => {
     if (kaTimer) {
-      clearTimeout(kaTimer);
+      clearInterval(kaTimer);
       kaTimer = null;
     }
   };
@@ -1066,51 +1017,40 @@ function guardSSEStream(src, { onFinish, idleMs = 0, keepaliveMs = 0 } = {}) {
     );
   };
 
-  /** 武装下游保活：自调度 setTimeout 链 + 「下次应发时刻」对齐。
+  /** 武装下游保活：常驻定时器 + 时间戳比较。
    *
-   *  v1 每写一个 chunk 都 clearInterval + setInterval（一次长回答上千次定时器
-   *  创建/销毁，吃免费版 10ms CPU 限额）；v2 改常驻 setInterval 后开销恒定，
-   *  但检查周期（keepaliveMs/4）的相位会把实际注释间隔放大到
-   *  ⌈keepaliveMs / tick⌉ × tick，非 4 的倍数配置最坏漂移 +25%。
-   *  现在：醒来时刻直接对齐 nextKaAt —— 写入路径只更新时间戳（不重排），
-   *  定时器醒来若未到点就按剩余时间重排；注释间隔与配置严格一致，
-   *  定时器数量仍恒定为 1，写路径零额外开销。 */
+   *  原实现每向调用方写一个 chunk 都要 clearInterval + setInterval，
+   *  一次长回答上千个 chunk 就是上千次定时器创建 / 销毁 —— 这些开销都记在
+   *  Workers 的 CPU 时间里，而免费版只有 10ms。改成常驻定时器后，写路径
+   *  只更新一个时间戳，定时器数量恒定为 1，对外语义（超过 keepaliveMs
+   *  没下发任何字节就补一条 SSE 注释）完全不变。 */
   const armKa = () => {
     if (!keepaliveMs || kaTimer || closed) return;
     lastOutAt = Date.now();
-    nextKaAt = lastOutAt + keepaliveMs;
-    const stepKa = () => {
+    kaTimer = setInterval(() => {
       if (closed) {
         clearKa();
         return;
       }
-      const now = Date.now();
-      if (now >= nextKaAt) {
-        try {
-          controllerRef.enqueue(encoder.encode(': ka\n\n'));
-          bytesOut += 6;
-          lastOutAt = now;
-        } catch {
-          closed = true;
-          clearKa();
-          return;
-        }
+      if (Date.now() - lastOutAt < keepaliveMs) return;
+      try {
+        controllerRef.enqueue(encoder.encode(': ka\n\n'));
+        bytesOut += 6;
+        lastOutAt = Date.now();
+      } catch {
+        closed = true;
+        clearKa();
       }
-      nextKaAt = lastOutAt + keepaliveMs;
-      kaTimer = setTimeout(stepKa, Math.max(1, nextKaAt - Date.now()));
-    };
-    kaTimer = setTimeout(stepKa, Math.max(1, nextKaAt - Date.now()));
+    }, KA_TICK);
   };
 
-  /** 向调用方下发字节的统一入口：统计字节数并刷新「最后下发时刻」，
-   *  供保活定时器判断（同时顺延下次应发时刻，避免数据流正常时误发注释） */
+  /** 向调用方下发字节的统一入口：统计字节数并刷新「最后下发时刻」，供保活定时器判断 */
   const out = (controller, bytes) => {
     if (closed) return;
     try {
       controller.enqueue(bytes);
       bytesOut += bytes.byteLength;
       lastOutAt = Date.now();
-      if (keepaliveMs) nextKaAt = lastOutAt + keepaliveMs;
     } catch {
       closed = true;
       clearKa();
@@ -1529,25 +1469,6 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
   }
   if (!body.model) return err('缺少 model 参数', 400, 'missing_model');
 
-  // 密钥 RPM 软限流（isolate 级，防单 Key 打爆上游；强配额走 quota_tokens）
-  if (!checkRpm(auth, settings)) {
-    recordRequest(env, ctx, {
-      auth,
-      settings,
-      request_id: reqId(),
-      model: body.model,
-      channel: null,
-      ok: false,
-      ms: 0,
-      error: 'rate_limited',
-    });
-    return err(
-      '该 Key 已达到每分钟请求数（RPM）上限，请稍后再试',
-      429,
-      'rate_limited'
-    );
-  }
-
   // 密钥级模型白名单
   if (!auth.admin && auth.record) {
     const allowed = auth.record.allowed_models;
@@ -1965,7 +1886,7 @@ async function deletePrefix(env, prefix) {
   let deleted = 0;
   let cursor;
   do {
-    const listed = await env.R2.list({ prefix, limit: 1000, cursor });
+    const listed = await env.R2.list({ prefix, limit: 200, cursor });
     const keys = listed.objects.map((o) => o.key);
     if (keys.length) {
       // R2 的 delete 支持直接传数组（单次上限 1000），
@@ -2052,147 +1973,16 @@ async function testChannel(env, ch, settings) {
 }
 
 /** 记录渠道健康状态到渠道配置（best-effort，与后台编辑共用同一把锁避免互相覆盖） */
-/* ---------------- 密钥 RPM 软限流（isolate 内存固定窗口） ---------------- */
-
-const rpmBuckets = new Map(); // key 标识 -> { winStart, count }
-
-/**
- * 密钥 RPM（每分钟请求数）检查：固定 60s 窗口计数。
- * - 密钥自己的 rpm 字段优先；未设置（null/undefined）时用 settings.rpm_default；0 = 不限。
- * - Workers 无跨实例共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置 × 实例数），
- *   用于「防单 Key 瞬时打爆上游」；计费级强配额请看 quota_tokens（走 R2 精确累加）。
- * - 计数在进入代理主流程时 +1（鉴权通过后才检查），被 429 的请求不计入下一窗口。
- */
-function checkRpm(auth, settings) {
-  if (!auth || auth.admin) return true; // ADMIN_KEY 直调不参与限流
-  const rec = auth.record;
-  if (!rec) return true;
-  const effRpm =
-    rec.rpm == null || rec.rpm === '' ? (settings && settings.rpm_default) | 0 : rec.rpm | 0;
-  if (effRpm <= 0) return true;
-  const now = Date.now();
-  const id = rec.key || rec.name || '?';
-  let b = rpmBuckets.get(id);
-  if (!b || now - b.winStart >= 60000) {
-    b = { winStart: now, count: 0 };
-    rpmBuckets.set(id, b);
-  }
-  b.count++;
-  if (rpmBuckets.size > 10000) rpmBuckets.clear(); // 极端膨胀保护（大量一次性 Key）
-  return b.count <= effRpm;
-}
-
-/* ---------------- Telegram 通知 ---------------- */
-
-/** Telegram Bot 消息：失败静默（通知失败不影响主流程），8s 超时防挂起 */
-async function sendTelegram(settings, text) {
-  const token = settings && settings.tg_bot_token;
-  const chatId = settings && settings.tg_chat_id;
-  if (!token || !chatId) return false;
+async function saveChannelHealth(env, channelId, health) {
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true,
-      }),
-      signal: ctrl.signal,
-    });
-    clearTimeout(t);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/* ---------------- R2 每日自动备份 ---------------- */
-
-let lastBackupDate = ''; // isolate 级去重：每天最多触发一次快照
-
-/**
- * 每日惰性备份：每天首个请求把 channels/keys/settings 快照到 backup/<日期>.json，
- * 保留最近 backup_keep_days 份（0 = 关闭）。无 cron 依赖；失败完全静默。
- * 恢复入口：管理端 /api/admin/restore（控制台「备份与恢复」）。
- */
-async function maybeAutoBackup(env, ctx, settings) {
-  try {
-    const keep = (settings && settings.backup_keep_days) | 0;
-    if (keep <= 0) return;
-    const today = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
-    if (today === lastBackupDate) return;
-    lastBackupDate = today; // 先记日期再备份：备份失败明天重试，避免每个请求都重试
-    const [channels, keys, settingsSnap] = await Promise.all([
-      r2GetJson(env, CHANNELS_KEY, []),
-      r2GetJson(env, KEYS_KEY, []),
-      r2GetJson(env, SETTINGS_KEY, {}),
-    ]);
-    const snap = {
-      type: 'oneapi-gateway-backup',
-      version: 1,
-      created_at: nowIso(),
-      channels,
-      keys,
-      settings: settingsSnap,
-    };
-    await r2PutJson(env, `backup/${today}.json`, snap);
-    // 清理超期份数（YYYY-MM-DD 字典序即时间序）
-    const listed = await env.R2.list({ prefix: 'backup/', limit: 1000 });
-    const old = listed.objects
-      .map((o) => o.key)
-      .filter((k) => k !== `backup/${today}.json`)
-      .sort();
-    const overflow = old.length - (keep - 1);
-    if (overflow > 0) {
-      const toDelete = old.slice(0, overflow);
-      try {
-        await env.R2.delete(toDelete);
-      } catch {
-        for (const k of toDelete) {
-          try {
-            await env.R2.delete(k);
-          } catch {
-            // 忽略单个失败
-          }
-        }
-      }
-    }
-  } catch {
-    // 备份失败不影响主流程
-  }
-}
-
-async function saveChannelHealth(env, channelId, health, { settings, ctx } = {}) {
-  try {
-    let notifyText = null;
     await withLock(CHANNELS_KEY, async () => {
       const channels = await r2GetJson(env, CHANNELS_KEY, []);
       const idx = channels.findIndex((c) => c.id === channelId);
       if (idx < 0) return;
-      const prev = channels[idx].health;
       channels[idx].health = { ...health, checked_at: nowIso() };
       await r2PutJson(env, CHANNELS_KEY, channels);
       invalidateCache(CHANNELS_KEY);
-      // 渠道状态翻转 → Telegram 通知（只在巡检触发，频率天然受控；
-      // 首次巡检没有旧状态，不打扰）
-      if (settings && (settings.tg_notify_down || settings.tg_notify_up) && prev) {
-        const wasOk = prev.ok !== false;
-        const isOk = health.ok !== false;
-        if (wasOk !== isOk) {
-          const name = channels[idx].name || channelId;
-          notifyText = isOk
-            ? `✅ [One-API] 渠道「${name}」已恢复\n状态：正常 · 延迟 ${health.ms || 0}ms\n时间：${nowIso()}`
-            : `🚨 [One-API] 渠道「${name}」巡检失败\n状态：异常 · ${String(health.message || '未知错误').slice(0, 180)}\n时间：${nowIso()}`;
-        }
-      }
     });
-    if (notifyText) {
-      const p = sendTelegram(settings, notifyText);
-      if (ctx && ctx.waitUntil) ctx.waitUntil(p);
-    }
   } catch {
     // 忽略
   }
@@ -2203,7 +1993,7 @@ async function saveChannelHealth(env, channelId, health, { settings, ctx } = {})
 async function handleAdmin(env, ctx, request) {
   const url = new URL(request.url);
   const path = url.pathname;
-  const gate = await requireAdmin(env, request);
+  const gate = requireAdmin(env, request);
   if (!gate.ok) return gate.res;
 
   /* ---- 鉴权探针 ----
@@ -2331,91 +2121,6 @@ async function handleAdmin(env, ctx, request) {
   }
 
   /* ---- 测试 ---- */
-  /* ---- 备份与恢复 ---- */
-  // 当场生成完整快照下载（channels + keys + settings，含时间戳）
-  if (path === '/api/admin/backup' && request.method === 'GET') {
-    const [ch, ks, st] = await Promise.all([
-      r2GetJson(env, CHANNELS_KEY, []),
-      r2GetJson(env, KEYS_KEY, []),
-      r2GetJson(env, SETTINGS_KEY, {}),
-    ]);
-    const snap = {
-      type: 'oneapi-gateway-backup',
-      version: 1,
-      created_at: nowIso(),
-      channels: ch,
-      keys: ks,
-      settings: st,
-    };
-    return new Response(JSON.stringify(snap, null, 2), {
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': `attachment; filename="oneapi-backup-${dateStr(Date.now(), settings.timezone_offset_minutes)}.json"`,
-        'Cache-Control': 'no-store',
-      },
-    });
-  }
-  // 列出每日自动备份（backup/<日期>.json）；?date=YYYY-MM-DD 直接下载某份
-  if (path === '/api/admin/backups' && request.method === 'GET') {
-    const wantDate = url.searchParams.get('date');
-    if (wantDate && /^\d{4}-\d{2}-\d{2}$/.test(wantDate)) {
-      const snap = await r2GetJson(env, `backup/${wantDate}.json`, null);
-      if (!snap) return err('该日期没有自动备份', 404, 'not_found');
-      return new Response(JSON.stringify(snap, null, 2), {
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Content-Disposition': `attachment; filename="oneapi-backup-${wantDate}.json"`,
-          'Cache-Control': 'no-store',
-        },
-      });
-    }
-    const listed = await env.R2.list({ prefix: 'backup/', limit: 1000 });
-    const backups = listed.objects
-      .map((o) => ({ date: o.key.slice(7, 17), size: o.size, uploaded: o.uploaded }))
-      .sort((a, b) => (a.date < b.date ? 1 : -1));
-    return json({ backups, keep_days: settings.backup_keep_days });
-  }
-  // 恢复：整体覆盖 channels/keys/settings（危险操作，需 confirm: true）
-  if (path === '/api/admin/restore' && request.method === 'POST') {
-    const body = await request.json().catch(() => null);
-    if (
-      !body ||
-      body.type !== 'oneapi-gateway-backup' ||
-      !Array.isArray(body.channels) ||
-      !Array.isArray(body.keys)
-    ) {
-      return err(
-        '备份文件格式不正确（需要「立即导出」生成的 oneapi-gateway-backup 完整快照）',
-        400,
-        'invalid_backup'
-      );
-    }
-    if (body.confirm !== true) {
-      return err(
-        '恢复会整体覆盖当前渠道/密钥/设置，请带上 confirm: true（控制台会先弹确认）',
-        400,
-        'confirm_required'
-      );
-    }
-    const nextSettings = normalizeSettings(body.settings || {});
-    await Promise.all([
-      withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels)),
-      withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys)),
-      (async () => {
-        await r2PutJson(env, SETTINGS_KEY, nextSettings);
-        invalidateSettingsCache();
-      })(),
-    ]);
-    invalidateCache(CHANNELS_KEY);
-    invalidateCache(KEYS_KEY);
-    return json({
-      ok: true,
-      channels: body.channels.length,
-      keys: body.keys.length,
-      restored_at: nowIso(),
-    });
-  }
-
   if (path === '/api/admin/test-channel' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     const channels = await r2GetJson(env, CHANNELS_KEY, []);
@@ -2429,7 +2134,7 @@ async function handleAdmin(env, ctx, request) {
           ok: !!r.ok,
           ms: firstOk ? firstOk.ms : ((r.keys || [])[0] || {}).ms || 0,
           message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || '测试失败').slice(0, 200),
-        }, { settings, ctx })
+        })
       );
     }
     return json(r);
@@ -2450,7 +2155,7 @@ async function handleAdmin(env, ctx, request) {
         message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || r.error || '测试失败').slice(0, 200),
       };
       results.push({ id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error });
-      await saveChannelHealth(env, ch.id, health, { settings, ctx });
+      await saveChannelHealth(env, ch.id, health);
     }
     return json({ ok: results.some((r) => r.ok), results });
   }
@@ -2520,10 +2225,6 @@ export default {
       );
     }
     if (request.method === 'OPTIONS') {
-      // 管理接口不开放跨域：控制台与 /api/admin/* 天然同源，跨域 preflight 一律拒绝
-      if (path.startsWith('/api/admin/')) {
-        return new Response(null, { status: 403 });
-      }
       return new Response(null, { status: 204, headers: CORS });
     }
 
@@ -2533,19 +2234,10 @@ export default {
     // 懒初始化 R2 数据结构（幂等）
     await ensureSeed(env);
 
-    // 版本号优先取 wrangler.toml [vars] 的 APP_VERSION（部署时与 package.json 同步维护），回退源码常量
-    const version = env.APP_VERSION || VERSION;
-
-    // 每日惰性备份：每天首个请求触发一次快照（异步，不阻塞请求；失败完全静默）
-    if (path !== '/healthz' && path !== '/health') {
-      const bootSettings = await loadSettings(env);
-      ctx.waitUntil(maybeAutoBackup(env, ctx, bootSettings));
-    }
-
     if (path === '/' && request.method === 'GET') {
       return json({
         name: 'oneapi-gateway',
-        version,
+        version: VERSION,
         r2: 'bound',
         admin: '/admin',
         endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/v1/embeddings'],
@@ -2553,7 +2245,7 @@ export default {
     }
 
     if ((path === '/healthz' || path === '/health') && request.method === 'GET') {
-      return json({ status: 'ok', version, time: nowIso() });
+      return json({ status: 'ok', version: VERSION, time: nowIso() });
     }
 
     if (path === '/admin' && request.method === 'GET') {
@@ -2563,18 +2255,7 @@ export default {
     }
 
     if (path.startsWith('/api/admin/')) {
-      const res = await handleAdmin(env, ctx, request);
-      // 安全收紧：管理接口响应不携带 CORS 头 —— 控制台与 API 同源，跨域（含恶意网页）
-      // 即使拿到 Admin Key 也不应能直接带着 X-Admin-Key 调用管理接口
-      const h = new Headers(res.headers);
-      h.delete('Access-Control-Allow-Origin');
-      h.delete('Access-Control-Allow-Headers');
-      h.delete('Access-Control-Allow-Methods');
-      return new Response(res.body, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: h,
-      });
+      return handleAdmin(env, ctx, request);
     }
 
     const settings = await loadSettings(env);
