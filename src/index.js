@@ -236,6 +236,21 @@ function defaultSettings() {
      * 0 = 关闭。
      */
     stream_keepalive_ms: 15000,
+    /**
+     * 渠道熔断：同一渠道「连续」上游失败达到该次数后临时熔断（选渠道时跳过），
+     * 冷却期结束自动放行（半开），再失败则重新熔断；任一次成功即清零计数。
+     * 只统计渠道侧的失败（5xx / 408 / 429 / 网络异常 / 流中断 / 网关流超时），
+     * 4xx 参数与鉴权错误以及客户端主动取消不计。0 = 关闭熔断。
+     */
+    breaker_error_threshold: 3,
+    /** 熔断冷却时长（毫秒）：打开后经过该时长自动放行试探 */
+    breaker_cooldown_ms: 300000,
+    /**
+     * 长任务分流阈值：请求体里的 max_tokens >= 该值时视为「长输出任务」，
+     * 挑选渠道时把未勾选「长输出稳定」的渠道排到最后（仍可用，只是靠后）。
+     * 0 = 关闭分流。对长流经常在尾部被上游切断的渠道，把它的长任务让给更稳的渠道。
+     */
+    long_task_min_tokens: 0,
     /** 请求日志保留天数（供「清理日志」使用） */
     log_retention_days: 30,
     /**
@@ -280,6 +295,24 @@ function normalizeSettings(raw) {
   s.allow_admin_key_as_api_key = s.allow_admin_key_as_api_key !== false;
   s.request_timeout_ms = clampInt(s.request_timeout_ms, 1000, 600000, d.request_timeout_ms);
   s.retries = clampInt(s.retries, 0, 5, d.retries);
+  s.breaker_error_threshold = clampInt(
+    s.breaker_error_threshold,
+    0,
+    20,
+    d.breaker_error_threshold
+  );
+  s.breaker_cooldown_ms = clampInt(
+    s.breaker_cooldown_ms,
+    10000,
+    1800000,
+    d.breaker_cooldown_ms
+  );
+  s.long_task_min_tokens = clampInt(
+    s.long_task_min_tokens,
+    0,
+    200000,
+    d.long_task_min_tokens
+  );
   s.stream_idle_timeout_ms = clampInt(
     s.stream_idle_timeout_ms,
     5000,
@@ -589,6 +622,117 @@ function pickChannels(channels, model, path) {
     i = j;
   }
   return out;
+}
+
+/* ---------------- 渠道健康：熔断降权 + 长任务分流 ---------------- */
+
+/** 健康状态持久化键（R2）：isolate 重建后恢复熔断状态用，best-effort */
+const CHANNEL_HEALTH_KEY = 'data/channel-health.json';
+
+/**
+ * 内存态渠道健康表：{ [渠道名]: { fails: 连续失败数, openedUntil: 熔断截止ts, lastAt: 最近失败ts } }
+ * 内存为主（热路径零开销），R2 异步持久化。多 isolate 并发写靠 withLock 串行，
+ * 短周期状态以「最近写入者」为准，误差一次失败计数以内，可接受。
+ */
+const CH_HEALTH_MEM = new Map();
+let chHealthLoaded = false;
+
+/** 懒加载：首个请求触发一次异步恢复，不阻塞当前请求（首请求用空状态，误差可接受） */
+function ensureChHealthLoaded(env) {
+  if (chHealthLoaded) return;
+  chHealthLoaded = true;
+  r2GetJson(env, CHANNEL_HEALTH_KEY, {})
+    .then((saved) => {
+      if (saved && typeof saved === 'object') {
+        for (const k of Object.keys(saved)) {
+          const v = saved[k];
+          if (v && typeof v === 'object' && !CH_HEALTH_MEM.has(k)) {
+            CH_HEALTH_MEM.set(k, {
+              fails: v.fails | 0,
+              openedUntil: v.openedUntil | 0,
+              lastAt: v.lastAt | 0,
+            });
+          }
+        }
+      }
+    })
+    .catch(() => {});
+}
+
+/** 持久化（后台写，失败不影响主流程） */
+function persistChHealth(env, ctx) {
+  const snap = {};
+  for (const [k, v] of CH_HEALTH_MEM) snap[k] = v;
+  ctx.waitUntil(
+    withLock(CHANNEL_HEALTH_KEY, () => r2PutJson(env, CHANNEL_HEALTH_KEY, snap)).catch(
+      () => {}
+    )
+  );
+}
+
+/** 渠道是否正在熔断（openedUntil 晚于当前时间） */
+function isChannelOpen(name, settings) {
+  const st = name && CH_HEALTH_MEM.get(name);
+  if (!st) return false;
+  const threshold = (settings && settings.breaker_error_threshold) | 0;
+  if (threshold <= 0) return false; // 熔断关闭
+  const cooldown = (settings && settings.breaker_cooldown_ms) | 0;
+  return st.openedUntil > Date.now() && cooldown > 0;
+}
+
+/** 记一次渠道侧失败：连续计数 +1，达到阈值即熔断（半开机制见 isChannelOpen） */
+function markChannelFailure(env, ctx, name, settings) {
+  if (!name) return;
+  const threshold = (settings && settings.breaker_error_threshold) | 0;
+  if (threshold <= 0) return; // 熔断关闭
+  ensureChHealthLoaded(env);
+  const st = CH_HEALTH_MEM.get(name) || { fails: 0, openedUntil: 0, lastAt: 0 };
+  st.fails += 1;
+  st.lastAt = Date.now();
+  if (st.fails >= threshold) {
+    const cooldown = (settings && settings.breaker_cooldown_ms) | 0;
+    if (cooldown > 0) {
+      st.openedUntil = Date.now() + cooldown;
+      st.fails = threshold; // 半开失败后继续累计，不再膨胀
+    }
+  }
+  CH_HEALTH_MEM.set(name, st);
+  persistChHealth(env, ctx);
+}
+
+/** 记一次成功：清零连续失败计数（熔断中的渠道成功 = 半开恢复） */
+function markChannelSuccess(env, ctx, name) {
+  if (!name) return;
+  ensureChHealthLoaded(env);
+  const st = CH_HEALTH_MEM.get(name);
+  if (!st) return;
+  if (st.fails > 0 || st.openedUntil > Date.now()) {
+    st.fails = 0;
+    st.openedUntil = 0;
+    CH_HEALTH_MEM.set(name, st);
+    persistChHealth(env, ctx);
+  }
+}
+
+/**
+ * 熔断过滤：跳过熔断中的渠道；若过滤后一个不剩则全部放行（兜底——
+ * 全部熔断时宁可照常轮询拿失败日志，也不直接 503）。
+ */
+function filterHealthyCandidates(candidates, settings) {
+  const open = candidates.filter((c) => !isChannelOpen(c.name, settings));
+  if (open.length > 0) return open;
+  // 全部熔断：保留原顺序继续尝试（渠道名字供日志甄别）
+  return candidates;
+}
+
+/**
+ * 长任务分流：请求声明了大 max_tokens 时，把「长输出稳定」未勾选的渠道
+ * 排到候选队尾（稳定分区——不剔除，保留优先级组内相对顺序，兜底仍可用）。
+ */
+function partitionByLongTask(candidates) {
+  const prefer = candidates.filter((c) => c.long_output_ok !== false);
+  const defer = candidates.filter((c) => c.long_output_ok === false);
+  return prefer.concat(defer);
 }
 
 /** 判断上游状态码是否值得在同一 Key 上重试 */
@@ -1642,7 +1786,16 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
   }
 
   const channels = await cachedJson(env, CHANNELS_KEY, [], CHANNELS_TTL_MS);
-  const candidates = pickChannels(channels, body.model, path);
+  let candidates = pickChannels(channels, body.model, path);
+  // 长任务分流：声明了大 max_tokens 的请求把「长输出稳定」未勾选的渠道排到队尾
+  if ((settings.long_task_min_tokens | 0) > 0) {
+    const wantLong = Number(body.max_tokens || 0) >= settings.long_task_min_tokens;
+    if (wantLong) candidates = partitionByLongTask(candidates);
+  }
+  // 熔断过滤：跳过熔断中的渠道（全部熔断时兜底放行，详见 filterHealthyCandidates）
+  if ((settings.breaker_error_threshold | 0) > 0) {
+    candidates = filterHealthyCandidates(candidates, settings);
+  }
   const requestId = reqId();
   const started = Date.now();
 
@@ -1689,6 +1842,10 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             failures.push(
               `${ch.name}${tag}: HTTP ${upstream.status} ${text.slice(0, 200)}`
             );
+            // 渠道侧失败（5xx / 408 / 429）计入熔断；4xx 参数与鉴权问题是调用方的问题
+            if (upstream.status >= 500 || upstream.status === 408 || upstream.status === 429) {
+              markChannelFailure(env, ctx, ch.name, settings);
+            }
             if (attempt < retries && isRetryableStatus(upstream.status)) {
               await sleep(200 * (attempt + 1));
               continue;
@@ -1705,6 +1862,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
           if (body.stream && isSse) {
             if (!upstream.body) {
               failures.push(`${ch.name}${tag}: 上游返回 200 但没有流式响应体`);
+              markChannelFailure(env, ctx, ch.name, settings);
               break; // 换下一个 Key
             }
             let resolveFinish;
@@ -1734,8 +1892,15 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                 );
             ctx.waitUntil(
               finishPromise
-                .then(({ usage, finish, meta }) =>
-                  recordRequest(env, ctx, {
+                .then(({ usage, finish, meta }) => {
+                  // 渠道健康上报：上游中断/网关超时都算渠道侧失败（太慢也算），
+                  // 客户端主动取消不动计数，正常完成清零（半开恢复）。
+                  if (finish === 'upstream_error' || finish === 'timeout') {
+                    markChannelFailure(env, ctx, ch.name, settings);
+                  } else if (finish === 'complete') {
+                    markChannelSuccess(env, ctx, ch.name);
+                  }
+                  return recordRequest(env, ctx, {
                     auth,
                     settings,
                     request_id: requestId,
@@ -1754,8 +1919,8 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                       finish === 'complete' || finish === 'client_abort'
                         ? undefined
                         : `stream_${finish}`,
-                  })
-                )
+                  });
+                })
                 .catch(() => {})
             );
             return new Response(streamBody, {
@@ -1782,6 +1947,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
           if (data && typeof data === 'object' && !Array.isArray(data) && data.model !== undefined) {
             data.model = body.model;
           }
+          markChannelSuccess(env, ctx, ch.name);
           recordRequest(env, ctx, {
             auth,
             settings,
@@ -1797,6 +1963,8 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
         } catch (e) {
           const msg = e && e.name === 'AbortError' ? '请求上游超时' : e.message || String(e);
           failures.push(`${ch.name}${tag}: ${msg}`);
+          // 网络异常 / 首字节超时都是渠道侧失败，计入熔断
+          markChannelFailure(env, ctx, ch.name, settings);
           if (attempt < retries) {
             await sleep(200 * (attempt + 1));
             continue;
@@ -2786,4 +2954,9 @@ export {
   normalizeSettings,
   pickChannels,
   channelKeys,
+  markChannelFailure,
+  markChannelSuccess,
+  isChannelOpen,
+  filterHealthyCandidates,
+  partitionByLongTask,
 };

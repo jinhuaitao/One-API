@@ -546,6 +546,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
             <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：收到上游第一个字节之后，超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
             <label>流式首字节超时（毫秒）<input type="number" id="s_firstbyte" min="0" max="600000" step="1000"><span class="hint">收到上游第一个字节之前的专用等待：长 prompt（几十 KB 上下文）在慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，统一用「流式静默超时」会把「上游正在算」误判成断流（客户端看到「上游超过静默超时未返回数据」）。0 = 与「流式静默超时」相同，默认 120000。</span></label>
+            <label>渠道熔断阈值（连续失败次数）<input type="number" id="s_breaker_n" min="0" max="20" step="1"><span class="hint">同一渠道连续出现渠道侧失败（5xx / 408 / 429 / 网络异常 / 流中断 / 网关流超时）达到该次数后临时熔断：选渠道时自动跳过它，流量让给健康渠道；冷却期结束自动放行试探（半开），再失败重新熔断，成功一次即清零。4xx 与客户端取消不计。0 = 关闭熔断，默认 3。</span></label>
+            <label>熔断冷却时长（毫秒）<input type="number" id="s_breaker_cd" min="10000" max="1800000" step="10000"><span class="hint">渠道熔断后经过该时长自动放行试探。太短起不到让流量改道的作用，太长会让刚恢复的渠道闲置过久，默认 300000（5 分钟）。</span></label>
+            <label>长任务分流阈值（max_tokens）<input type="number" id="s_longtask" min="0" max="200000" step="500"><span class="hint">请求的 max_tokens ≥ 该值时视为长输出任务，挑渠道时把渠道编辑里未勾选「长输出稳定」的渠道排到候选队尾（仍可用，只是靠后）。适合「某渠道长流经常在尾部被上游切断」的场景。0 = 关闭分流。</span></label>
             <label>下游保活间隔（毫秒）<input type="number" id="s_stream_ka" min="0" max="600000" step="1000"><span class="hint">网关超过该时长没向调用方下发任何字节时，主动补一条 SSE 注释（": ka"，客户端会忽略），防止模型长思考 / 上游排队期间的「零字节窗口」被中间的 nginx / CDN / 客户端读超时掐断。与「流式静默超时」互补：一个管上游→网关，一个管网关→调用方。0 = 关闭，默认 15000。</span></label>
             <label>瞬时错误重试次数（429 / 5xx / 网络异常）<input type="number" id="s_retries" min="0" max="5" step="1"></label>
           </div>
@@ -1293,6 +1296,7 @@ function openChannelModal(i){
     '<label>超时毫秒（留空用全局默认）<input id="m_timeout" type="number" min="1000" value="' + esc(c.timeout_ms || '') + '" placeholder="60000"></label>' +
     '<label>默认 max_tokens（Anthropic 必需）<input id="m_maxt" type="number" value="' + esc(c.default_max_tokens || 4096) + '"></label>' +
     '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="m_enabled" type="checkbox"' + (c.enabled !== false ? ' checked' : '') + '> 启用该渠道</label>' +
+    '<label class="check" style="justify-content:flex-start"><input id="m_longout" type="checkbox"' + (c.long_output_ok !== false ? ' checked' : '') + '> 长输出稳定（大 max_tokens 的长任务优先走这里）</label>' +
     '</div>' +
     '<label class="fld">渠道 API Key（多个 Key 用英文逗号 , 分隔）<textarea id="m_key" rows="2" placeholder="sk-aaa,sk-bbb">' + esc(c.api_key || '') + '</textarea></label>' +
     '<label class="fld">对外暴露的模型名（网关模型名，逗号分隔，* 表示全部）<input id="m_models" type="text" value="' + esc((c.models || []).join(',')) + '" placeholder="DeepSeek-V4-Flash,Agents-A1"><span class="hint">调用方用这里的名字请求网关，它同时决定该渠道能被哪些模型名匹配到。</span></label>' +
@@ -1332,6 +1336,8 @@ function saveChannel(){
     weight: Math.max(1, parseInt($('m_weight').value, 10) || 1),
     enabled: $('m_enabled').checked
   };
+  // 长输出稳定：取消勾选时写入 false（分流时该渠道的长任务排到队尾）
+  c.long_output_ok = $('m_longout').checked;
   var t = parseInt($('m_timeout').value, 10);
   if(t > 0) c.timeout_ms = t;
   if(editingCh >= 0 && S.channels[editingCh].health) c.health = S.channels[editingCh].health;
@@ -1673,6 +1679,9 @@ function renderSettings(){
   $('s_timeout').value = s.request_timeout_ms || 60000;
   $('s_stream_idle').value = s.stream_idle_timeout_ms || 60000;
   $('s_firstbyte').value = s.stream_first_byte_ms === 0 ? 0 : s.stream_first_byte_ms || 120000;
+  $('s_breaker_n').value = s.breaker_error_threshold === 0 ? 0 : s.breaker_error_threshold || 3;
+  $('s_breaker_cd').value = s.breaker_cooldown_ms || 300000;
+  $('s_longtask').value = s.long_task_min_tokens || 0;
   $('s_stream_ka').value =
     s.stream_keepalive_ms === 0 ? 0 : s.stream_keepalive_ms || 15000;
   $('s_retries').value = s.retries == null ? 1 : s.retries;
@@ -1722,6 +1731,18 @@ function collectSettings(){
     stream_first_byte_ms: (() => {
       const v = parseInt($('s_firstbyte').value, 10);
       return Number.isFinite(v) && v > 0 ? v : 0;
+    })(),
+    breaker_error_threshold: (() => {
+      const v = parseInt($('s_breaker_n').value, 10);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    })(),
+    breaker_cooldown_ms: (() => {
+      const v = parseInt($('s_breaker_cd').value, 10);
+      return Number.isFinite(v) ? Math.max(10000, v) : 300000;
+    })(),
+    long_task_min_tokens: (() => {
+      const v = parseInt($('s_longtask').value, 10);
+      return Number.isFinite(v) ? Math.max(0, v) : 0;
     })(),
     stream_keepalive_ms: (() => {
       const v = parseInt($('s_stream_ka').value, 10);
