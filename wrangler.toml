@@ -26,8 +26,10 @@ enabled = true
 # 巡检 + 状态翻转/流式异常率 Telegram 告警 + 过期日志自动清理。
 # 注意：经控制台「连接 Git」部署时本段会被自动应用；若改为手动部署，
 # 部署后请在控制台 Triggers 页确认 Cron 已生效。
-[triggers]
-crons = ["*/10 * * * *"]
+# ⚠️ 免费版全账号 Cron 上限 5 个，本账号已占满（部署报错 10072），整段暂时注释；
+#    腾出一个名额或升级付费版后，把下面两行开头的 # 去掉即恢复定时任务。
+# [triggers]
+# crons = ["*/10 * * * *"]
 
 # R2 绑定：网关的渠道配置、密钥、设置、统计与请求日志全部存放在这个桶里
 #   data/channels.json · data/keys.json · data/settings.json
