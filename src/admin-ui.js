@@ -545,7 +545,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="grid">
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
             <label>流式静默超时（毫秒）<input type="number" id="s_stream_idle" min="5000" max="600000" step="1000"><span class="hint">流式响应专用的「读超时」：收到上游第一个字节之后，超过该时长一个字节都没下发即判定断流，网关主动断开并给客户端一个明确收尾。上面的请求超时只覆盖到首字节，管不了流中途卡死。</span></label>
-            <label>流式首字节超时（毫秒）<input type="number" id="s_firstbyte" min="0" max="600000" step="1000"><span class="hint">收到上游第一个字节之前的专用等待：长 prompt（几十 KB 上下文）在慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，统一用「流式静默超时」会把「上游正在算」误判成断流（客户端看到「上游超过静默超时未返回数据」）。0 = 与「流式静默超时」相同，默认 120000。</span></label>
+            <label>流式首字节超时（毫秒）<input type="number" id="s_firstbyte" min="0" max="600000" step="1000"><span class="hint">收到上游第一个字节之前的专用等待：长 prompt（几十 KB 上下文）在慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，统一用「流式静默超时」会把「上游正在算」误判成断流（客户端看到「上游超过静默超时未返回数据」）。0 = 与「流式静默超时」相同，默认 300000。</span></label>
             <label>渠道熔断阈值（连续失败次数）<input type="number" id="s_breaker_n" min="0" max="20" step="1"><span class="hint">同一渠道连续出现渠道侧失败（5xx / 408 / 429 / 网络异常 / 流中断 / 网关流超时）达到该次数后临时熔断：选渠道时自动跳过它，流量让给健康渠道；冷却期结束自动放行试探（半开），再失败重新熔断，成功一次即清零。4xx 与客户端取消不计。0 = 关闭熔断，默认 3。</span></label>
             <label>熔断冷却时长（毫秒）<input type="number" id="s_breaker_cd" min="10000" max="1800000" step="10000"><span class="hint">渠道熔断后经过该时长自动放行试探。太短起不到让流量改道的作用，太长会让刚恢复的渠道闲置过久，默认 300000（5 分钟）。</span></label>
             <label>长任务分流阈值（max_tokens）<input type="number" id="s_longtask" min="0" max="200000" step="500"><span class="hint">请求的 max_tokens ≥ 该值时视为长输出任务，挑渠道时把渠道编辑里未勾选「长输出稳定」的渠道排到候选队尾（仍可用，只是靠后）。适合「某渠道长流经常在尾部被上游切断」的场景。0 = 关闭分流。</span></label>
@@ -574,6 +574,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="grid">
             <label>默认 RPM（每密钥每分钟请求数，0 = 不限）<input type="number" id="s_rpm_default" min="0" max="100000" step="1"><span class="hint">未单独设置 RPM 的密钥沿用此值。Workers 多实例下为软限制（实际上限 ≈ 配置 × 实例数），用于防单 Key 打爆上游；计费级强配额请用密钥的 Token 配额。</span></label>
             <label>每日自动备份保留份数<input type="number" id="s_backup_keep" min="0" max="365" step="1"><span class="hint">每天首个请求把渠道 / 密钥 / 设置快照到 backup/<日期>.json，超期自动清理。0 = 关闭自动备份。</span></label>
+            <label>定时巡检间隔（分钟）<input type="number" id="s_patrol_min" min="0" max="1440" step="5"><span class="hint">Cron 每 10 分钟唤起，巡检按此间隔执行：对每个启用渠道的每个 Key 发一次真实小请求（耗少量上游额度），状态翻转时发 Telegram 通知；过期日志清理（每天一次）与备份兜底不受此项影响。0 = 关闭定时巡检，默认 30。</span></label>
           </div>
           <div class="grid" style="margin-top:12px">
             <label>Telegram Bot Token<input type="password" id="s_tg_token" placeholder="123456:ABC-DEF..." autocomplete="off"><span class="hint">找 @BotFather 创建 Bot 获取；留空则不通知。</span></label>
@@ -1306,7 +1307,7 @@ function openChannelModal(i){
     '<label>Base URL（末尾不要加 /v1）<input id="m_base" type="text" value="' + esc(c.base_url || '') + '" placeholder="https://api.openai.com"></label>' +
     '<label>优先级（越小越优先）<input id="m_prio" type="number" value="' + esc(c.priority == null ? 100 : c.priority) + '"></label>' +
     '<label>权重（同优先级内加权随机）<input id="m_weight" type="number" min="1" value="' + esc(c.weight || 1) + '"></label>' +
-    '<label>超时毫秒（留空用全局默认）<input id="m_timeout" type="number" min="1000" value="' + esc(c.timeout_ms || '') + '" placeholder="60000"></label>' +
+    '<label>超时毫秒（留空用全局默认）<input id="m_timeout" type="number" min="1000" value="' + esc(c.timeout_ms || '') + '" placeholder="180000"></label>' +
     '<label>默认 max_tokens（Anthropic 必需）<input id="m_maxt" type="number" value="' + esc(c.default_max_tokens || 4096) + '"></label>' +
     '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="m_enabled" type="checkbox"' + (c.enabled !== false ? ' checked' : '') + '> 启用该渠道</label>' +
     '<label class="check" style="justify-content:flex-start"><input id="m_longout" type="checkbox"' + (c.long_output_ok !== false ? ' checked' : '') + '> 长输出稳定（大 max_tokens 的长任务优先走这里）</label>' +
@@ -1689,9 +1690,9 @@ function exportLogs(){
 function renderSettings(){
   var s = S.settings || {};
   $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
-  $('s_timeout').value = s.request_timeout_ms || 60000;
-  $('s_stream_idle').value = s.stream_idle_timeout_ms || 60000;
-  $('s_firstbyte').value = s.stream_first_byte_ms === 0 ? 0 : s.stream_first_byte_ms || 120000;
+  $('s_timeout').value = s.request_timeout_ms || 180000;
+  $('s_stream_idle').value = s.stream_idle_timeout_ms || 180000;
+  $('s_firstbyte').value = s.stream_first_byte_ms === 0 ? 0 : s.stream_first_byte_ms || 300000;
   $('s_breaker_n').value = s.breaker_error_threshold === 0 ? 0 : s.breaker_error_threshold || 3;
   $('s_breaker_cd').value = s.breaker_cooldown_ms || 300000;
   $('s_longtask').value = s.long_task_min_tokens || 0;
@@ -1703,6 +1704,7 @@ function renderSettings(){
   $('s_models').value = (s.custom_models || []).join(',');
   $('s_rpm_default').value = s.rpm_default == null ? 0 : s.rpm_default;
   $('s_backup_keep').value = s.backup_keep_days == null ? 7 : s.backup_keep_days;
+  $('s_patrol_min').value = s.patrol_interval_min == null ? 30 : s.patrol_interval_min;
   $('s_tg_token').value = s.tg_bot_token || '';
   $('s_tg_chat').value = s.tg_chat_id || '';
   $('s_tg_down').checked = s.tg_notify_down !== false;
@@ -1739,8 +1741,8 @@ function collectSettings(){
   if(!Number.isFinite(tz)) tz = 480;
   return {
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
-    request_timeout_ms: parseInt($('s_timeout').value, 10) || 60000,
-    stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 60000,
+    request_timeout_ms: parseInt($('s_timeout').value, 10) || 180000,
+    stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 180000,
     stream_first_byte_ms: (() => {
       const v = parseInt($('s_firstbyte').value, 10);
       return Number.isFinite(v) && v > 0 ? v : 0;
@@ -1769,6 +1771,7 @@ function collectSettings(){
     pricing: pricing,
     rpm_default: Math.max(0, parseInt($('s_rpm_default').value, 10) || 0),
     backup_keep_days: Math.max(0, parseInt($('s_backup_keep').value, 10) || 0),
+    patrol_interval_min: Math.min(1440, Math.max(0, parseInt($('s_patrol_min').value, 10) || 0)),
     tg_bot_token: $('s_tg_token').value.trim(),
     tg_chat_id: $('s_tg_chat').value.trim(),
     tg_notify_down: $('s_tg_down').checked,

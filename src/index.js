@@ -208,8 +208,10 @@ function defaultSettings() {
   return {
     /** 是否允许用 ADMIN_KEY 直接作为网关密钥调用 /v1/*（便于自测） */
     allow_admin_key_as_api_key: true,
-    /** 上游请求超时（毫秒，首字节） */
-    request_timeout_ms: 60000,
+    /** 上游请求超时（毫秒，作用于等待上游响应头阶段）：很多上游在出首个
+     * token 前不发响应头，排队/预填充都算在这段里，60s 很容易误杀慢启动，
+     * 因此默认放宽到 180s，与流式静默超时对齐（渠道可单独覆盖）。 */
+    request_timeout_ms: 180000,
     /** 瞬时错误（429/5xx/网络异常）在同一 Key 上的额外重试次数 */
     retries: 1,
     /**
@@ -218,15 +220,16 @@ function defaultSettings() {
      * 注意 request_timeout_ms 只作用于「首字节」，无法覆盖流中途卡死的情况，
      * 因此流式必须单独有这个读超时。
      */
-    stream_idle_timeout_ms: 60000,
+    stream_idle_timeout_ms: 180000,
     /**
      * 流式响应的「首字节超时」（毫秒）：收到上游第一个字节之前用这个时长判定
      * 静默，之后回落到 stream_idle_timeout_ms。长 prompt（几十 KB 上下文）在
      * 慢渠道 / 大模型上，出首 token 前的排队 + 推理远比流中途的停顿更久，
-     * 用同一个 60s 会把「上游正在算」误判成断流。0 = 与 stream_idle_timeout_ms
+     * 用同一个较短的静默超时会把「上游正在算」误判成断流，因此默认给到
+     * 300s，比流中途的静默超时更宽。0 = 与 stream_idle_timeout_ms
      * 相同（旧行为）。
      */
-    stream_first_byte_ms: 120000,
+    stream_first_byte_ms: 300000,
     /**
      * 流式响应的「下游保活间隔」（毫秒）：网关超过该时长没有向调用方下发任何字节时，
      * 主动补一条 SSE 注释（`: ka\n\n`）。标准 SSE 客户端会忽略注释行，
@@ -286,6 +289,13 @@ function defaultSettings() {
      * 保留最近 backup_keep_days 份（超期自动清理）。0 = 关闭自动备份。
      */
     backup_keep_days: 7,
+    /**
+     * 定时巡检间隔（分钟）：Cron 每 10 分钟唤起一次，巡检按这个间隔节流。
+     * 巡检会对每个启用渠道的每个 Key 各发一次真实小请求（耗少量上游额度），
+     * 状态翻转时按 tg_notify_down / tg_notify_up 发 Telegram 通知。
+     * 0 = 关闭定时巡检（每日日志清理与备份兜底不受影响）。
+     */
+    patrol_interval_min: 30,
   };
 }
 
@@ -332,6 +342,7 @@ function normalizeSettings(raw) {
     d.stream_first_byte_ms
   );
   s.log_retention_days = clampInt(s.log_retention_days, 1, 3650, d.log_retention_days);
+  s.patrol_interval_min = clampInt(s.patrol_interval_min, 0, 1440, d.patrol_interval_min);
   s.timezone_offset_minutes = clampInt(
     s.timezone_offset_minutes,
     -720,
@@ -976,6 +987,35 @@ function anthropicToOpenAI(data, model) {
   };
 }
 
+/**
+ * SSE 文本行尾归一化器（逐片调用）：把 \r\n 与孤立的 \r 都归一为 \n。
+ *
+ * 与「对整个缓冲区做 replace」相比开销只跟新分片大小有关；分片末尾的
+ * \r 先暂存、等下一片首字节到齐再判定是 \r\n 还是孤立 \r，因此
+ * \r 与 \n 落在两个分片里也能正确合并（旧实现对整个 buffer 替换
+ * 靠的正是这一点，现在用常数级状态达到同样效果）。
+ * flush() 返回流结束时仍暂存的行尾（一个 \n），无暂存时返回空串。
+ */
+function createEolNormalizer() {
+  let heldCr = false;
+  return {
+    push(text) {
+      let t = heldCr ? '\r' + text : text;
+      heldCr = false;
+      if (t.endsWith('\r')) {
+        heldCr = true;
+        t = t.slice(0, -1);
+      }
+      return t.replace(/\r\n|\r/g, '\n');
+    },
+    flush() {
+      if (!heldCr) return '';
+      heldCr = false;
+      return '\n';
+    },
+  };
+}
+
 /** Anthropic SSE → OpenAI SSE（流式翻译）
  *  onFinish 可选回调：结束（正常或异常）时返回 (usage, finish)，
  *  usage 从 message_start / message_delta 事件中提取，拿不到则为 null；
@@ -1082,14 +1122,14 @@ function anthropicStreamToOpenAI(
     // content_block_stop 等事件无需转发
   };
 
+  const norm = createEolNormalizer();
   const transform = new TransformStream({
     transform(bytes, controller) {
       activityRef.lastUpstreamAt = Date.now();
-      buffer += decoder.decode(bytes, { stream: true });
       // 容忍 CRLF：部分 Anthropic 兼容中转（套一层的网关）会输出 \r\n，
       // 只按 \n\n 切分会永远拼不出一个完整事件，表现为「流式翻译零输出」。
-      // 对整个缓冲区做替换，因此 \r 与 \n 落在两个分片里也能正确合并。
-      if (buffer.indexOf('\r') >= 0) buffer = buffer.replace(/\r\n/g, '\n');
+      // 逐片归一化（跨分片的 \r 由 norm 暂存拼接），不再对整个缓冲区做替换。
+      buffer += norm.push(decoder.decode(bytes, { stream: true }));
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx);
@@ -1125,10 +1165,19 @@ function anthropicStreamToOpenAI(
   });
 
   // 上游错误交给 guardSSEStream 统一收尾并上报结束原因
-  // （正常路径由 flush 先结算 usage，settleUsage 自带幂等保护）
-  upstreamBody.pipeTo(transform.writable).catch(() => {});
+  // （正常路径由 flush 先结算 usage，settleUsage 自带幂等保护）；
+  // pipeTo 的拒绝原因同样留存并合并透传，理由同 rewriteOpenAISSE。
+  let pipeError = '';
+  upstreamBody.pipeTo(transform.writable).catch((e) => {
+    pipeError = String((e && e.message) || e || '').slice(0, 200);
+  });
   return guardSSEStream(transform.readable, {
-    onFinish: (reason, meta) => settleUsage(null, reason, meta),
+    onFinish: (reason, meta) =>
+      settleUsage(
+        null,
+        reason,
+        pipeError && !(meta && meta.error) ? { ...(meta || {}), error: pipeError } : meta
+      ),
     idleMs,
     keepaliveMs,
     firstByteMs,
@@ -1137,7 +1186,65 @@ function anthropicStreamToOpenAI(
 }
 
 /**
- * 把单个 SSE 数据块里的 model 字段改写为「网关模型名」，顺带提取 usage。
+ * 轻量 model 改写（无 usage 的单行块专用）：用 indexOf 扫描定位顶层
+ * "model" 字符串值，相同则整块原样返回、不同则只替换那一个值，其余
+ * 字节不动，不做整对象 parse/stringify。返回 null 表示不宜轻量处理
+ * （多行块、非纯 data 块、值带转义、模型名含特殊字符等），由分发入口
+ * 回落完整路径，语义与旧实现保持一致。
+ *
+ * 依据：OpenAI 风格 chunk 中第一个未转义的 "model" 键即顶层字段——
+ * 正文文本里的引号在 JSON 中必是转义形态，拼不出 "model": "..."
+ * 这样的连续形态，不会误命中内容。
+ */
+function tryLightModelRewrite(raw, model) {
+  // 多行块直接回落完整路径：单行块是绝对主流，热路径只做 indexOf 扫描，
+  // 不split、不正则、不解析。模型名含引号/反斜杠时不适合拼回 JSON，回落。
+  if (raw.indexOf('\n') >= 0) return null;
+  if (model.indexOf('"') >= 0 || model.indexOf('\\') >= 0) return null;
+  const t = raw.trim();
+  if (!t.startsWith('data:')) return null;
+  const payload = t.slice(5).trim();
+  if (payload === '[DONE]') return raw;
+  if (!payload.startsWith('{')) return null;
+  const ki = payload.indexOf('"model"');
+  if (ki < 0) return raw;
+  let i = ki + 7;
+  while (payload[i] === ' ') i++;
+  if (payload[i] !== ':') return null;
+  i++;
+  while (payload[i] === ' ') i++;
+  if (payload[i] !== '"') return null;
+  const valStart = i + 1;
+  const valEnd = payload.indexOf('"', valStart);
+  if (valEnd < 0) return null;
+  const val = payload.slice(valStart, valEnd);
+  if (val.indexOf('\\') >= 0) return null;
+  if (val === model) return raw;
+  return 'data: ' + payload.slice(0, valStart) + model + payload.slice(valEnd);
+}
+
+/**
+ * 把单个 SSE 数据块里的 model 字段改写为「网关模型名」，顺带提取 usage（分发入口）。
+ *
+ * - 不含 "model" / "usage"：原样返回（原有快路径）；
+ * - 只含 "model" 不含 "usage"：走轻量改写。典型 chunk 里 model 与网关名
+ *   相同时整块零解析透传，不同也只替换那一个值——长回答上千个 chunk 时，
+ *   省下的正是逐块整对象 parse/stringify 的 CPU 大头；
+ * - 含 "usage"：走完整路径精确提取（一股流里只有一两块，成本可忽略）。
+ */
+function rewriteSseBlock(raw, model, onUsage) {
+  const hasModel = raw.includes('"model"');
+  const hasUsage = raw.includes('"usage"');
+  if (!hasModel && !hasUsage) return raw;
+  if (!hasUsage) {
+    const light = tryLightModelRewrite(raw, model);
+    if (light !== null) return light;
+  }
+  return rewriteSseBlockFull(raw, model, onUsage);
+}
+
+/**
+ * 【完整路径】把单个 SSE 数据块里的 model 字段改写为「网关模型名」，顺带提取 usage。
  *
  * - 只有当整块都由 data: 行组成、且每行都是合法 JSON 时才重写（保留 [DONE]）；
  *   出现 event: / id: / retry: 或非 JSON 数据时，整块原样返回，避免破坏协议。
@@ -1146,7 +1253,7 @@ function anthropicStreamToOpenAI(
  *   这一步很关键——长回答有上千个 chunk，每个都 parse+stringify 会累积大量 CPU 时间，
  *   越过 Workers 的 CPU 时限后请求会被运行时直接终止，表现就是「流到一半断掉」。
  */
-function rewriteSseBlock(raw, model, onUsage) {
+function rewriteSseBlockFull(raw, model, onUsage) {
   if (!raw.includes('"model"') && !raw.includes('"usage"')) return raw;
 
   const lines = raw.split('\n');
@@ -1217,7 +1324,12 @@ function guardSSEStream(src, {
   let nextKaAt = 0; // 下次应发保活注释的绝对时刻；写入路径只更新它，不重排定时器
   let controllerRef = null; // start() 里赋值，供保活定时器向下游写注释用
 
-  const meta = () => ({ bytes: bytesOut, first_byte: gotFirst });
+  let errorDetail = '';
+  const meta = () => ({
+    bytes: bytesOut,
+    first_byte: gotFirst,
+    ...(errorDetail ? { error: errorDetail } : {}),
+  });
 
   const settle = (reason) => {
     if (settled) return;
@@ -1372,6 +1484,9 @@ function guardSSEStream(src, {
         }
       } catch (e) {
         clearTimers();
+        // 上游错误原文留进诊断信息：否则日志里只剩 upstream_error，
+        // 看不到上游到底是断连、限流还是协议错误，无从定性断流。
+        errorDetail = String((e && e.message) || e || '').slice(0, 200);
         if (!settled) {
           out(controller, encoder.encode(tail('upstream_error')));
         }
@@ -1436,10 +1551,11 @@ function rewriteOpenAISSE(
     usage = u;
   };
 
+  const norm = createEolNormalizer();
   const transform = new TransformStream({
     transform(bytes, controller) {
       activityRef.lastUpstreamAt = Date.now();
-      buffer += decoder.decode(bytes, { stream: true }).replace(/\r\n?/g, '\n');
+      buffer += norm.push(decoder.decode(bytes, { stream: true }));
       let idx;
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx);
@@ -1449,6 +1565,7 @@ function rewriteOpenAISSE(
       }
     },
     flush(controller) {
+      buffer += norm.flush();
       if (buffer.trim()) {
         if (isDoneBlock(buffer)) sawDone = true;
         controller.enqueue(encoder.encode(rewriteSseBlock(buffer, model, capture)));
@@ -1459,10 +1576,15 @@ function rewriteOpenAISSE(
     },
   });
 
-  // 上游错误不再在这里吞掉：交给 guardSSEStream 统一收尾并上报结束原因
-  upstreamBody.pipeTo(transform.writable).catch(() => {});
+  // 上游错误不再在这里吞掉：交给 guardSSEStream 统一收尾并上报结束原因；
+  // 同时把 pipeTo 的拒绝原因留存一份，守卫 meta 里没有时合并透传给日志。
+  let pipeError = '';
+  upstreamBody.pipeTo(transform.writable).catch((e) => {
+    pipeError = String((e && e.message) || e || '').slice(0, 200);
+  });
   return guardSSEStream(transform.readable, {
-    onFinish: done,
+    onFinish: (finish, meta) =>
+      done(finish, pipeError && !(meta && meta.error) ? { ...(meta || {}), error: pipeError } : meta),
     idleMs,
     keepaliveMs,
     firstByteMs,
@@ -1719,6 +1841,9 @@ function recordRequest(env, ctx, o) {
         stream: !!o.stream,
         // 流式结束原因：complete / client_abort / upstream_error / timeout
         finish: o.stream ? o.finish || 'complete' : undefined,
+        // 流式诊断信息（bytes / first_byte / error）：此前调用方传了却没落库，
+        // README 让用户看的 stream_meta 在日志里根本不存在，这里补上。
+        stream_meta: o.stream ? o.stream_meta || null : undefined,
         tokens,
         cost,
         ms: o.ms,
@@ -1918,7 +2043,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
                     error:
                       finish === 'complete' || finish === 'client_abort'
                         ? undefined
-                        : `stream_${finish}`,
+                        : `stream_${finish}${meta && meta.error ? ': ' + meta.error : ''}`,
                   });
                 })
                 .catch(() => {})
@@ -1985,8 +2110,11 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     ms: Date.now() - started,
     error: failures.join(' | ').slice(0, 500),
   });
+  // 对下游脱敏：渠道名与上游错误原文只进管理日志（上方 recordRequest 已记录
+  // 完整 failures），返回给调用方的只有笼统文案 + request_id，凭 id 可在
+  // 控制台日志里对上详情，避免持钥人从报错里摸清渠道结构与上游细节。
   return err(
-    `所有渠道均失败: ${failures.join(' | ').slice(0, 500)}`,
+    `所有渠道均失败，请稍后重试（request_id: ${requestId}）`,
     502,
     'upstream_failed'
   );
@@ -2010,6 +2138,7 @@ function summarizeLog(key, d) {
     stream: !!d.stream,
     // 流式结束原因：complete / client_abort / upstream_error / timeout
     finish: d.finish || '',
+    stream_meta: d.stream_meta || null,
     usage_missing: !!d.usage_missing,
     retries: d.retries || 0,
     error: d.error ? String(d.error).slice(0, 300) : '',
@@ -2594,21 +2723,8 @@ async function handleAdmin(env, ctx, request) {
   }
   if (path === '/api/admin/logs/cleanup' && request.method === 'POST') {
     const body = await request.json().catch(() => ({}));
-    const keep = clampInt(
-      body && body.days != null ? body.days : settings.log_retention_days,
-      1,
-      3650,
-      settings.log_retention_days
-    );
-    const cutoff = dateStr(Date.now() - keep * 86400000, settings.timezone_offset_minutes);
-    const dates = await listLogDates(env, 0);
-    const victims = dates.filter((d) => d < cutoff);
-    let removed = 0;
-    for (const d of victims) {
-      removed += await deletePrefix(env, `${LOG_PREFIX}${d}/`);
-      await env.R2.delete(STATS_PREFIX + d + '.json').catch(() => {});
-    }
-    return json({ ok: true, keep_days: keep, cutoff, removed_dates: victims.length, removed_logs: removed });
+    const r = await cleanupExpiredLogs(env, settings, body && body.days != null ? body.days : null);
+    return json({ ok: true, ...r });
   }
   // 清空日志：scope=day 清空指定日期（默认今天），scope=all 清空全部日志与统计
   if (path === '/api/admin/logs/clear' && request.method === 'POST') {
@@ -2754,23 +2870,7 @@ async function handleAdmin(env, ctx, request) {
     return json(r);
   }
   if (path === '/api/admin/test-all' && request.method === 'POST') {
-    const channels = await r2GetJson(env, CHANNELS_KEY, []);
-    const results = [];
-    for (const ch of channels) {
-      if (!ch.enabled) {
-        results.push({ id: ch.id, name: ch.name, skipped: true, ok: false });
-        continue;
-      }
-      const r = await testChannel(env, ch, settings);
-      const firstOk = (r.keys || []).find((k) => k.ok);
-      const health = {
-        ok: !!r.ok,
-        ms: firstOk ? firstOk.ms : ((r.keys || [])[0] || {}).ms || 0,
-        message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || r.error || '测试失败').slice(0, 200),
-      };
-      results.push({ id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error });
-      await saveChannelHealth(env, ch.id, health, { settings, ctx });
-    }
+    const results = await patrolAllChannels(env, ctx, settings);
     return json({ ok: results.some((r) => r.ok), results });
   }
   if (path === '/api/admin/test-route' && request.method === 'POST') {
@@ -2827,6 +2927,109 @@ async function handleAdmin(env, ctx, request) {
   return err('未知管理接口', 404, 'not_found');
 }
 
+/* ---------------- 定时任务（Cron Trigger） ---------------- */
+
+const CRON_STATE_KEY = 'data/cron-state.json';
+/** 流式异常率告警阈值（常量，不做成设置项：个人网关量级下够用，避免设置膨胀） */
+const STREAM_ALERT_MIN_STREAMS = 20;
+/** 当日流式异常结束占比达到此值才告警 */
+const STREAM_ALERT_RATE = 0.3;
+/** 两次异常率告警至少间隔 6 小时 */
+const STREAM_ALERT_COOLDOWN_MS = 6 * 3600 * 1000;
+
+/** 巡检全部渠道（与控制台「全部测试」同一逻辑，管理接口与定时任务共用） */
+async function patrolAllChannels(env, ctx, settings) {
+  const channels = await r2GetJson(env, CHANNELS_KEY, []);
+  const results = [];
+  for (const ch of channels) {
+    if (!ch.enabled) {
+      results.push({ id: ch.id, name: ch.name, skipped: true, ok: false });
+      continue;
+    }
+    const r = await testChannel(env, ch, settings);
+    const firstOk = (r.keys || []).find((k) => k.ok);
+    const health = {
+      ok: !!r.ok,
+      ms: firstOk ? firstOk.ms : ((r.keys || [])[0] || {}).ms || 0,
+      message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || r.error || '测试失败').slice(0, 200),
+    };
+    results.push({ id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error });
+    await saveChannelHealth(env, ch.id, health, { settings, ctx });
+  }
+  return results;
+}
+
+/** 清理过期日志与对应统计（与控制台「清理过期日志」同一逻辑，两处共用） */
+async function cleanupExpiredLogs(env, settings, daysOverride) {
+  const keep = clampInt(
+    daysOverride != null ? daysOverride : settings.log_retention_days,
+    1,
+    3650,
+    settings.log_retention_days
+  );
+  const cutoff = dateStr(Date.now() - keep * 86400000, settings.timezone_offset_minutes);
+  const dates = await listLogDates(env, 0);
+  const victims = dates.filter((d) => d < cutoff);
+  let removed = 0;
+  for (const d of victims) {
+    removed += await deletePrefix(env, `${LOG_PREFIX}${d}/`);
+    await env.R2.delete(STATS_PREFIX + d + '.json').catch(() => {});
+  }
+  return { keep_days: keep, cutoff, removed_dates: victims.length, removed_logs: removed };
+}
+
+/**
+ * 定时任务主流程：Cron 每 10 分钟唤起一次，各项工作按 data/cron-state.json
+ * 里的状态各自节流，互不阻塞定性：
+ *  1) 每日备份兜底——当天一个请求都没有时也不会漏（maybeAutoBackup 自带按日去重）；
+ *  2) 过期日志清理——每天最多执行一次，让「日志保留天数」从手动按钮变成自动生效；
+ *  3) 渠道巡检——按 patrol_interval_min 节流，状态翻转的 TG 通知在 saveChannelHealth 内；
+ *  4) 流式异常率告警——看真实流量统计（不依赖巡检），超阈值且过了冷却期才发 TG。
+ */
+async function runScheduledTasks(env, ctx) {
+  const settings = await loadSettings(env);
+  const state = (await r2GetJson(env, CRON_STATE_KEY, {})) || {};
+  const now = Date.now();
+  const today = dateStr(now, settings.timezone_offset_minutes);
+  let dirty = false;
+
+  await maybeAutoBackup(env, ctx, settings);
+
+  if (state.last_cleanup_date !== today) {
+    await cleanupExpiredLogs(env, settings);
+    state.last_cleanup_date = today;
+    dirty = true;
+  }
+
+  const intervalMin = settings.patrol_interval_min | 0;
+  if (intervalMin > 0 && now - (state.last_patrol_at || 0) >= intervalMin * 60000) {
+    await patrolAllChannels(env, ctx, settings);
+    state.last_patrol_at = now;
+    dirty = true;
+  }
+
+  if (
+    settings.tg_bot_token &&
+    settings.tg_chat_id &&
+    now - (state.last_stream_alert_at || 0) >= STREAM_ALERT_COOLDOWN_MS
+  ) {
+    const stats = await r2GetJson(env, STATS_PREFIX + today + '.json', null);
+    const streams = (stats && stats.streams) || 0;
+    const aborted = (stats && stats.streams_aborted) || 0;
+    if (streams >= STREAM_ALERT_MIN_STREAMS && aborted / streams >= STREAM_ALERT_RATE) {
+      const pct = Math.round((aborted / streams) * 100);
+      await sendTelegram(
+        settings,
+        `🚨 [One-API] 今日流式异常率过高\n流式请求 ${streams} 次，异常结束 ${aborted} 次（${pct}%）\n多为上游断流 / 网关超时，请到控制台日志页按「仅异常结束」筛选查看。\n时间：${nowIso()}`
+      );
+      state.last_stream_alert_at = now;
+      dirty = true;
+    }
+  }
+
+  if (dirty) await r2PutJson(env, CRON_STATE_KEY, state).catch(() => {});
+}
+
 /* ---------------- 入口 ---------------- */
 
 export default {
@@ -2838,6 +3041,9 @@ export default {
         'r2_missing'
       );
     }
+    const url = new URL(request.url);
+    const path = url.pathname;
+
     if (request.method === 'OPTIONS') {
       // 管理接口不开放跨域：控制台与 /api/admin/* 天然同源，跨域 preflight 一律拒绝
       if (path.startsWith('/api/admin/')) {
@@ -2845,9 +3051,6 @@ export default {
       }
       return new Response(null, { status: 204, headers: CORS });
     }
-
-    const url = new URL(request.url);
-    const path = url.pathname;
 
     // 懒初始化 R2 数据结构（幂等）
     await ensureSeed(env);
@@ -2938,6 +3141,11 @@ export default {
 
     return err('Not Found', 404, 'not_found');
   },
+
+  /** Cron Trigger 入口（wrangler.toml [triggers]，每 10 分钟唤起，内部再节流） */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runScheduledTasks(env, ctx).catch(() => {}));
+  },
 };
 
 // 导出纯函数，便于单测（wrangler 只使用 default 导出）
@@ -2959,4 +3167,7 @@ export {
   isChannelOpen,
   filterHealthyCandidates,
   partitionByLongTask,
+  patrolAllChannels,
+  cleanupExpiredLogs,
+  runScheduledTasks,
 };
