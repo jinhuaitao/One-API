@@ -8,6 +8,27 @@ name = "oneapi-gateway"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
+# 资源上限（仅付费版 Standard 生效）：把单次调用的 CPU 上限从付费版默认
+# 30s 抬到上限 300s，给长流式回答的逐块处理留余量，减少跑到一半被
+# 运行时以 1102 强杀、客户端收到「incomplete chunked read」的概率。
+# ⚠️ 当前按免费版部署（CPU 封顶 10ms），整段已注释停用；升级到 Workers
+#    付费版后，把下面两行开头的 # 去掉即可启用。
+# [limits]
+# cpu_ms = 300000
+
+# 打开 Workers Logs：控制台可按请求查看 outcome（含 exceededCpu）、
+# CPU 时间与日志，断流定位不再只靠网关自己的日志（强杀时它恰好不落库）。
+[observability]
+enabled = true
+
+# 定时任务：每 10 分钟唤起 Worker 的 scheduled()（内部再按状态节流：
+# 巡检间隔默认 30 分钟、日志清理每天一次、备份按日兜底），实现自动
+# 巡检 + 状态翻转/流式异常率 Telegram 告警 + 过期日志自动清理。
+# 注意：经控制台「连接 Git」部署时本段会被自动应用；若改为手动部署，
+# 部署后请在控制台 Triggers 页确认 Cron 已生效。
+[triggers]
+crons = ["*/10 * * * *"]
+
 # R2 绑定：网关的渠道配置、密钥、设置、统计与请求日志全部存放在这个桶里
 #   data/channels.json · data/keys.json · data/settings.json
 #   data/stats/<日期>.json · logs/<日期>/

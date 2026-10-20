@@ -11,7 +11,7 @@
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
     "test": "node test/run-all.mjs",
-    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs",
+    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/scheduled.mjs",
     "preview": "node preview/build.mjs"
   },
   "type": "module",
