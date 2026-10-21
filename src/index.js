@@ -374,7 +374,7 @@ function normalizeSettings(raw) {
     d.timezone_offset_minutes
   );
   s.custom_models = Array.isArray(s.custom_models)
-    ? s.custom_models.map((m) => String(m).trim()).filter(Boolean)
+    ? s.custom_models.map((m) => String(m == null ? '' : m).trim()).filter(Boolean)
     : [];
   // RPM 软上限与备份保留份数
   s.rpm_default = clampInt(s.rpm_default, 0, 100000, 0);
@@ -2962,7 +2962,13 @@ async function testChannel(env, ch, settings, opts = {}) {
   if (!keys.length) {
     return { ok: false, keys: [], error: '该渠道未配置 API Key' };
   }
-  const model = (ch.models || []).find((m) => m !== '*') || 'test';
+  // 探测模型选取顺序：model_map 左侧（对外暴露名，且必然真实存在）→ 具体模型名
+  // → 兜底 'test'。只用 '*' 的渠道若直接拿 'test' 探测会永远失败，
+  // 误标「渠道异常」甚至触发 Telegram 误告警。
+  const model =
+    Object.keys(ch.model_map || {})[0] ||
+    (ch.models || []).find((m) => m !== '*') ||
+    'test';
   const timeoutMs = channelTimeoutMs(ch, settings);
 
   const probeKey = async (key, i) => {

@@ -1981,14 +1981,15 @@ function renderKeys(){
     var expTxt = k.expires_at ? esc(String(k.expires_at).slice(0, 10)) : '<span class="muted">长期</span>';
     if(exp) expTxt = '<span class="bad">' + esc(String(k.expires_at).slice(0, 10)) + '</span>';
     var subs = [];
-    if(k.owner_username) subs.push('用户 ' + esc(k.owner_username));
-    if(k.note) subs.push(esc(k.note));
-    if(k.allowed_models && k.allowed_models.length && k.allowed_models.indexOf('*') < 0) subs.push('限 ' + esc(k.allowed_models.join('/')));
+    if(k.owner_username) subs.push('用户 ' + k.owner_username);
+    if(k.note) subs.push(k.note);
+    if(k.allowed_models && k.allowed_models.length && k.allowed_models.indexOf('*') < 0) subs.push('限 ' + k.allowed_models.join('/'));
     if(k.rpm != null) subs.push(k.rpm > 0 ? 'RPM ' + k.rpm : 'RPM 不限');
-    if(k.last_used_at) subs.push('最近 ' + esc(fmtTime(k.last_used_at)));
+    if(k.last_used_at) subs.push('最近 ' + fmtTime(k.last_used_at));
+    var subsTxt = esc(subs.join(' · '));
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-key" data-i="' + i + '"' + (k.enabled !== false ? ' checked' : '') + '><span></span></label></td>' +
-      '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub" title="' + esc(subs.join(' · ')) + '">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
+      '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub" title="' + subsTxt + '">' + subsTxt + '</span>' : '') + '</div></div></td>' +
       '<td class="mono nowrap">' + esc(maskKey(k.key || k.key_prefix)) + ' <button class="ghost sm" data-act="copy-key" data-i="' + i + '" title="复制密钥（仅创建当次可用；遗失请重新生成）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button></td>' +
       '<td>' + quotaCell(k) + '</td>' +
       '<td class="nowrap ar">' + fmtNum(k.used_tokens) + (k.quota_tokens > 0 ? ' <span class="muted">/ ' + fmtNum(k.quota_tokens) + '</span>' : '') + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
