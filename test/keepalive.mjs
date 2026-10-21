@@ -25,13 +25,15 @@ function tracker() {
 const block = (content, model = 'real') =>
   `data: {"id":"1","model":"${model}","choices":[{"delta":{"content":"${content}"}}]}\n\n`;
 
-// 1) 下游保活：上游中途停顿 160ms、保活间隔 40ms，下游应收到 `: ka` 注释
+// 1) 下游保活：上游中途停顿 500ms、保活间隔 40ms，下游应收到 `: ka` 注释
+//    停顿窗口要足够大：系统负载高时定时器可能晚触发数百毫秒，窗口太小
+//    （如 160ms）会让唯一一次保活机会被 clearTimers 取消，测试假失败。
 {
   const t = tracker();
   const src = new ReadableStream({
     async start(c) {
       c.enqueue(enc.encode(block('A')));
-      await new Promise((r) => setTimeout(r, 160));
+      await new Promise((r) => setTimeout(r, 500));
       c.enqueue(enc.encode(block('B')));
       c.close();
     },
