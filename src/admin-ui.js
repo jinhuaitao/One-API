@@ -703,7 +703,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
         <div class="card">
           <div class="card-head">
-            <div><h3>限流 · 通知 · 备份</h3><p class="desc">密钥 RPM 软限流、Telegram 渠道告警、每日自动备份</p></div>
+            <div><h3>限流 · 通知</h3><p class="desc">密钥 RPM 软限流、Telegram 渠道告警、每日自动备份</p></div>
           </div>
           <div class="grid">
             <label>默认 RPM（每密钥每分钟请求数，0 = 不限）<input type="number" id="s_rpm_default" min="0" max="100000" step="1"><span class="hint">未单独设置 RPM 的密钥沿用此值。Workers 多实例下为软限制（实际上限 ≈ 配置 × 实例数），用于防单 Key 打爆上游；计费级强配额请用密钥的 Token 配额。</span></label>
