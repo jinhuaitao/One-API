@@ -1,14 +1,28 @@
-# OneAPI Gateway
+<div align="center">
 
-OpenAI 兼容的 AI 网关，运行在 **Cloudflare Workers + R2**。  
-多渠道路由、故障转移、密钥与套餐、账号体系、中文控制台，无需服务器。
+<h1>OneAPI Gateway</h1>
 
+<b>OpenAI 兼容的 AI 网关</b><br>
+多渠道路由 · 故障转移 · 密钥与套餐 · 账号体系 · 中文控制台
+
+<p>
+  <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white">
+  <img alt="Cloudflare R2" src="https://img.shields.io/badge/Storage-R2-F38020?style=flat-square&logo=cloudflare&logoColor=white">
+  <img alt="OpenAI Compatible" src="https://img.shields.io/badge/API-OpenAI%20Compatible-412991?style=flat-square&logo=openai&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/Version-2.5.0-2ea44f?style=flat-square">
+</p>
+
+<p><a href="#特性">特性</a> · <a href="#架构">架构</a> · <a href="#部署">部署</a> · <a href="#测试">测试</a> · <a href="#接口">接口</a> · <a href="#设置">设置</a> · <a href="#常见问题">常见问题</a></p>
+
+</div>
+
+> [!TIP]
 > **一键部署**：Cloudflare 控制台连接 GitHub，构建时自动创建 R2 桶并绑定，无需手动建桶。
 
 ## 特性
 
 | 模块 | 能力 |
-| --- | --- |
+| :--- | :--- |
 | 接口 | `/v1/models`、`/v1/chat/completions`（流式）、`/v1/completions`、`/v1/embeddings` |
 | 渠道 | OpenAI 兼容直通；Anthropic 原生自动互转（文本 / 图片 / tools / SSE） |
 | 路由 | 优先级 + 权重、多 Key 轮询、失败换 Key、超时重试、熔断、长任务分流 |
@@ -41,6 +55,21 @@ OpenAI 兼容的 AI 网关，运行在 **Cloudflare Workers + R2**。
 - 按申请时的条款快照执行；同套餐续费顺延，换套餐重新起算。
 - 到期返回 `403 plan_expired`；模型白名单与密钥白名单取交集；任一 RPM 超限返回 `429`。
 
+## 架构
+
+```mermaid
+flowchart LR
+  C[客户端] -->|OpenAI 格式| W[Cloudflare Worker]
+  W -->|OpenAI 兼容| O[OpenAI / DeepSeek / Moonshot]
+  W -->|格式互转| A[Anthropic]
+  W <-->|配置 · 日志 · 备份| R[(R2)]
+```
+
+1. **鉴权与限额** — 校验网关密钥、配额、有效期、模型白名单与 RPM。
+2. **选择渠道** — 按模型匹配渠道，优先级 + 权重排序，多 Key 轮询。
+3. **转发与收尾** — 流式转发、双超时、下游保活、失败重试与熔断。
+4. **写入 R2** — 请求日志、按天统计、渠道与密钥状态、每日备份。
+
 ## 部署
 
 ### 1. 推送代码
@@ -56,7 +85,7 @@ git push -u origin main
 **Workers & Pages → Create → Connect to Git**，选择仓库并填写：
 
 | 项 | 值 |
-| --- | --- |
+| :--- | :--- |
 | 构建命令 | `npm run build` |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账户 ID |
 | `CLOUDFLARE_API_TOKEN` | API Token，权限至少 **Account / R2 / Edit** |
@@ -69,7 +98,8 @@ git push -u origin main
 `npm run build` 执行 `scripts/ensure-r2.mjs`：解析 `wrangler.toml` 的 `[[r2_buckets]]`，逐个检查桶是否存在，不存在则调用 Cloudflare API 创建，最后由 wrangler 部署并绑定。幂等，可重复执行。
 </details>
 
-> 无需 Cron Triggers：保活、日志清理、备份都由「请求触发 + `ctx.waitUntil`」完成，间隔在「系统设置 → 限流 · 通知 · 备份」调整。零流量时不会运行，恢复流量后的首个请求会补跑。
+> [!IMPORTANT]
+> **无需 Cron Triggers**：保活、日志清理、备份都由「请求触发 + `ctx.waitUntil`」完成，间隔在「系统设置 → 限流 · 通知 · 备份」调整。零流量时不会运行，恢复流量后的首个请求会补跑。
 
 ### 3. 初始化
 
@@ -85,6 +115,7 @@ curl https://<worker>.workers.dev/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"你好"}]}'
 ```
 
+> [!NOTE]
 > 建议在 **Settings → Variables and Secrets** 添加 `ADMIN_KEY`，忘记管理员密码时可用 `X-Admin-Key` 应急登录；日常登录不需要它。
 
 ## 本地开发
@@ -101,7 +132,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 ## 测试
 
 | 命令 | 覆盖 |
-| --- | --- |
+| :--- | :--- |
 | `npm test` | 全量回归：账号 + 套餐 + 流式 + 内置保活 |
 | `npm run test:accounts` | 初始化 / 登录 / 注册 / 找回 / 配额 / 备份恢复 |
 | `npm run test:plans` | 套餐 CRUD / 申请审核 / 配额·有效期·RPM·模型限制 |
@@ -114,7 +145,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 ## 接口
 
 | 范围 | 接口 |
-| --- | --- |
+| :--- | :--- |
 | 网关 | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/completions` · `POST /v1/embeddings` |
 | 公开 | `GET /` · `GET /healthz` · `GET /admin` · `GET /api/auth/state` |
 | 账号 | `POST /api/auth/{setup,login,logout,register,recover,change-password,security}` · `GET /api/auth/recovery?username=` · `GET /api/auth/me` |
@@ -130,7 +161,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 ### 网关设置
 
 | 设置 | 默认 | 说明 |
-| --- | --- | --- |
+| :--- | :---: | :--- |
 | `allow_admin_key_as_api_key` | `true` | 是否允许 `ADMIN_KEY` 直接调用 `/v1/*`，生产建议关闭 |
 | `request_timeout_ms` | `180000` | 上游请求超时（首字节） |
 | `stream_idle_timeout_ms` | `180000` | 流式静默超时：上游超过该时长无任何字节即判定断流 |
@@ -140,7 +171,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 ### 系统设置
 
 | 设置 | 默认 | 说明 |
-| --- | --- | --- |
+| :--- | :---: | :--- |
 | `allow_registration` | `false` | 开放自助注册；关闭时由管理员建号 |
 | `allow_password_recovery` | `true` | 允许问答找回密码 |
 | `default_user_quota_tokens` | `0` | 新用户默认 Token 配额，0 = 不限 |
@@ -149,6 +180,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 | `custom_models` | `[]` | 额外对外暴露的模型名，仅影响 `/v1/models` 展示 |
 | `patrol_interval_min` | `30` | 内置保活间隔（分钟），0 = 关闭；零流量时不运行 |
 
+> [!TIP]
 > 日志查不到刚产生的记录时，优先检查时区偏移是否与本地一致。
 
 ## 数据
@@ -222,3 +254,5 @@ backup/<日期>.json        每日自动备份
 
 仅支持 `/v1/chat/completions`；`max_tokens` 必需（请求未指定时用渠道默认值 4096）；`temperature` 钳制到 0~1；`system` / `developer` 消息合并为 `system`；同角色消息自动合并。
 </details>
+
+<div align="center"><sub>Built on Cloudflare Workers + R2 · 无需服务器 · 无需 Cron</sub></div>
