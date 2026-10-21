@@ -235,7 +235,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .empty svg{width:30px;height:30px;margin-bottom:10px;opacity:.45}
   .tname{display:flex;align-items:center;gap:9px;min-width:0}
   .tname>div{min-width:0}
-  .tname b{font-weight:600;white-space:nowrap}
+  .tname b{font-weight:600;overflow-wrap:anywhere}
   .tname .sub{font-size:11.5px;color:var(--muted);display:block;font-weight:400;margin-top:2px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .quota{display:flex;align-items:center;gap:8px;min-width:130px}
   .progress{flex:1;height:6px;background:var(--input);border-radius:var(--r-pill);overflow:hidden;border:1px solid var(--border)}
@@ -338,10 +338,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .login-card button{width:100%}
   .login-tip{margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.65}
   .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:var(--r-sm);padding:9px 11px;text-align:left;font-size:12px;line-height:1.6}
+  .login-warn.bad{color:var(--bad);background:var(--bad-soft)}
   .login-card .auth-form{text-align:left;margin-top:4px}
   .login-card .auth-form label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text2);margin-bottom:11px}
   .login-card .auth-form input{margin-bottom:0;text-align:left}
   .login-card .auth-form .hint{font-size:11.5px;color:var(--muted);line-height:1.6}
+  .field-err{font-size:11.5px;color:var(--bad);line-height:1.55;text-align:left}
+  input.bad-input,select.bad-input{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
   .login-card .auth-links{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:12px}
   .login-card a.link{color:var(--accent);cursor:pointer;text-decoration:none}
   .login-card a.link:hover{text-decoration:underline}
@@ -856,6 +859,80 @@ function esc(s){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
   });
 }
+/* 与后端 usernameError 一致：空串表示合法，否则返回具体原因 */
+function usernameIssue(raw){
+  var u = String(raw == null ? '' : raw).trim();
+  if(!u) return '请填写用户名或邮箱';
+  if(u.indexOf('@') >= 0){
+    if(u.length > 254) return '邮箱地址最长 254 个字符';
+    if(/\\s/.test(u)) return '邮箱地址不能包含空格';
+    var at = u.lastIndexOf('@');
+    var local = u.slice(0, at), domain = u.slice(at + 1);
+    if(!local) return '邮箱缺少 @ 前的账号部分，例如 name@example.com';
+    if(local.length > 64) return '邮箱 @ 前的部分最多 64 个字符';
+    if(!/^[A-Za-z0-9._%+-]+$/.test(local)) return '邮箱 @ 前只能使用字母、数字和 . _ % + -';
+    if(local.charAt(0) === '.' || local.charAt(local.length - 1) === '.' || local.indexOf('..') >= 0) return '邮箱 @ 前的点号不能位于开头、结尾或连续出现';
+    if(!domain) return '邮箱缺少 @ 后的域名，例如 name@example.com';
+    if(domain.length > 253) return '邮箱域名最长 253 个字符';
+    if(!/^[A-Za-z0-9.-]+$/.test(domain)) return '邮箱域名只能包含字母、数字、点号和短横线';
+    var labels = domain.split('.');
+    if(labels.length < 2) return '邮箱域名格式不正确，例如 example.com';
+    for(var i = 0; i < labels.length; i++){
+      if(!labels[i]) return '邮箱域名格式不正确，例如 example.com';
+      if(labels[i].length > 63) return '邮箱域名单段最长 63 个字符';
+      if(labels[i].charAt(0) === '-' || labels[i].charAt(labels[i].length - 1) === '-') return '邮箱域名中的短横线不能位于开头或结尾';
+    }
+    if(!/^[A-Za-z]{2,}$/.test(labels[labels.length - 1])) return '邮箱域名结尾需为 2 位以上字母，例如 .com';
+    return '';
+  }
+  if(u.length < 2) return '用户名至少 2 个字符；也可填写邮箱地址';
+  if(u.length > 24) return '用户名最多 24 个字符；如需更长请使用邮箱';
+  if(!/^[A-Za-z0-9_\\u4e00-\\u9fa5-]+$/.test(u)) return '用户名只能包含中英文、数字、下划线或短横线；如需使用 @ 或点号请填写完整邮箱';
+  return '';
+}
+function clearFieldErrors(scope){
+  var root = scope || $('authBox');
+  if(!root || !root.querySelectorAll) return;
+  Array.prototype.forEach.call(root.querySelectorAll('.field-err'), function(el){ el.remove(); });
+  Array.prototype.forEach.call(root.querySelectorAll('.bad-input'), function(el){ el.classList.remove('bad-input'); });
+}
+function fieldError(id, msg, noFocus){
+  var el = $(id);
+  if(!el) return;
+  clearFieldErrors(el.parentNode);
+  el.classList.add('bad-input');
+  var span = document.createElement('span');
+  span.className = 'field-err';
+  span.textContent = msg;
+  (el.parentNode || el).appendChild(span);
+  if(!noFocus){ try{ el.focus(); }catch(e){} }
+}
+function authWarn(msg, type){
+  var box = $('authBox');
+  if(!box) return;
+  var el = box.querySelector('.login-warn');
+  if(!el){
+    el = document.createElement('div');
+    box.appendChild(el);
+  }
+  el.className = 'login-warn' + (type === 'bad' ? ' bad' : '');
+  el.textContent = msg;
+}
+document.addEventListener('input', function(e){
+  var el = e.target;
+  if(!el || !el.parentNode) return;
+  var err = el.parentNode.querySelector ? el.parentNode.querySelector('.field-err') : null;
+  if(err) err.remove();
+  if(el.classList) el.classList.remove('bad-input');
+});
+document.addEventListener('blur', function(e){
+  var el = e.target;
+  if(!el || !el.id || !String(el.value || '').trim()) return;
+  var issue = '';
+  if(el.id === 'a_user' && (authMode === 'setup' || authMode === 'register')) issue = usernameIssue(el.value);
+  else if(el.id === 'r_user' || el.id === 'aa_user') issue = usernameIssue(el.value);
+  if(issue) fieldError(el.id, issue, true);
+}, true);
 function fmtNum(n){ return Number(n || 0).toLocaleString('en-US'); }
 function fmtCost(n){ n = Number(n || 0); if(!n) return '0.00'; if(n < 0.01) return n.toFixed(4); return n.toFixed(2); }
 function fmtShort(n){
@@ -1048,7 +1125,7 @@ function showAuth(mode, msg){
     title = '初始化管理员账号';
     sub = '首次使用：创建管理员账号后即可进入控制台，无需再配置 ADMIN_KEY。';
     h = '<div class="auth-form">' +
-      '<label>管理员用户名<input id="a_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线" autocomplete="username"></label>' +
+      '<label>管理员用户名<input id="a_user" type="text" maxlength="254" placeholder="用户名或邮箱" autocomplete="username"><span class="hint">2~24 位中英文、数字、下划线或短横线；也可直接填写邮箱地址</span></label>' +
       '<label>密码<input id="a_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
       '<label>确认密码<input id="a_pass2" type="password" maxlength="128" autocomplete="new-password"></label>' +
       '<label>安全问题<input id="a_q" type="text" maxlength="100" placeholder="如：我的第一只宠物叫什么"></label>' +
@@ -1056,13 +1133,13 @@ function showAuth(mode, msg){
       '<button data-act="auth-setup">创建管理员账号</button></div>';
   } else if(mode === 'login'){
     title = '登录控制台';
-    sub = '使用账号密码登录';
+    sub = '使用用户名或邮箱与密码登录';
     var links = [];
     if(AUTH.allow_registration) links.push('<a class="link" data-act="auth-mode" data-mode="register">注册账号</a>');
     if(AUTH.allow_password_recovery) links.push('<a class="link" data-act="auth-mode" data-mode="recover">忘记密码</a>');
     if(AUTH.admin_key_configured) links.push('<a class="link" data-act="auth-mode" data-mode="emergency">应急 ADMIN_KEY</a>');
     h = '<div class="auth-form">' +
-      '<label>用户名<input id="a_user" type="text" maxlength="24" autocomplete="username"></label>' +
+      '<label>用户名或邮箱<input id="a_user" type="text" maxlength="254" placeholder="用户名或 name@example.com" autocomplete="username"></label>' +
       '<label>密码<input id="a_pass" type="password" maxlength="128" autocomplete="current-password"></label>' +
       '<button data-act="auth-login">登录</button></div>' +
       (links.length ? '<div class="auth-links">' + links.join('') + '</div>' : '');
@@ -1070,7 +1147,7 @@ function showAuth(mode, msg){
     title = '注册账号';
     sub = '注册后可以创建自己的网关密钥并查看用量';
     h = '<div class="auth-form">' +
-      '<label>用户名<input id="a_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线" autocomplete="username"></label>' +
+      '<label>用户名或邮箱<input id="a_user" type="text" maxlength="254" placeholder="用户名或 name@example.com" autocomplete="username"><span class="hint">2~24 位中英文、数字、下划线或短横线；也可直接填写邮箱地址</span></label>' +
       '<label>密码<input id="a_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
       '<label>确认密码<input id="a_pass2" type="password" maxlength="128" autocomplete="new-password"></label>' +
       '<label>安全问题<input id="a_q" type="text" maxlength="100" placeholder="如：我的第一只宠物叫什么"></label>' +
@@ -1079,9 +1156,9 @@ function showAuth(mode, msg){
       '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
   } else if(mode === 'recover'){
     title = '找回密码';
-    sub = '输入用户名，通过安全问题重置密码';
+    sub = '输入用户名或邮箱，通过安全问题重置密码';
     h = '<div class="auth-form">' +
-      '<label>用户名<input id="r_user" type="text" maxlength="24" autocomplete="username"></label>' +
+      '<label>用户名或邮箱<input id="r_user" type="text" maxlength="254" placeholder="用户名或 name@example.com" autocomplete="username"></label>' +
       '<button data-act="auth-lookup">下一步</button></div>' +
       '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
   } else if(mode === 'recover2'){
@@ -1139,81 +1216,105 @@ function finishLogin(r){
     if(!isSessionErr(e)) toast(e.message, 'bad');
   });
 }
+function authServerError(e){
+  var byCode = {
+    bad_username: 'a_user', username_taken: 'a_user',
+    bad_password: 'a_pass', bad_question: 'a_q', bad_answer: 'a_a'
+  };
+  var id = byCode[e.code];
+  if(id && $(id)) fieldError(id, e.message);
+  else authWarn(e.message || '操作失败，请稍后重试', 'bad');
+}
 function setupAdmin(){
   var btn = document.querySelector('[data-act="auth-setup"]');
+  clearFieldErrors();
   var u = $('a_user').value.trim(), p = $('a_pass').value, p2 = $('a_pass2').value;
   var q = $('a_q').value.trim(), a = $('a_a').value;
-  if(!u) return toast('请填写用户名', 'bad');
-  if(p.length < 8) return toast('密码至少 8 位', 'bad');
-  if(p !== p2) return toast('两次输入的密码不一致', 'bad');
-  if(!q) return toast('请填写安全问题', 'bad');
-  if(!a) return toast('请填写安全问题答案', 'bad');
+  var issue = usernameIssue(u);
+  if(issue) return fieldError('a_user', issue);
+  if(p.length < 8) return fieldError('a_pass', '密码至少 8 位');
+  if(p.length > 128) return fieldError('a_pass', '密码最多 128 位');
+  if(p !== p2) return fieldError('a_pass2', '两次输入的密码不一致');
+  if(!q) return fieldError('a_q', '请填写安全问题');
+  if(q.length < 2) return fieldError('a_q', '安全问题至少 2 个字');
+  if(!a) return fieldError('a_a', '请填写安全问题答案');
   busyBtn(btn, true, '创建中…');
   fetchJson('/api/auth/setup', 'POST', { username: u, password: p, question: q, answer: a }).then(function(r){
     toast('管理员账号已创建', 'ok');
     return finishLogin(r);
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    authServerError(e);
     if(e.code === 'already_initialized') bootAuth();
   });
 }
 function loginSubmit(){
   var btn = document.querySelector('[data-act="auth-login"]');
   var u = $('a_user').value.trim(), p = $('a_pass').value;
-  if(!u || !p) return toast('请输入用户名与密码', 'bad');
+  clearFieldErrors();
+  if(!u) return fieldError('a_user', '请输入用户名或邮箱');
+  if(!p) return fieldError('a_pass', '请输入密码');
   busyBtn(btn, true, '登录中…');
   fetchJson('/api/auth/login', 'POST', { username: u, password: p }).then(function(r){
     return finishLogin(r);
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    authWarn(e.message || '登录失败，请检查网络后重试', 'bad');
   });
 }
 function registerSubmit(){
   var btn = document.querySelector('[data-act="auth-register"]');
+  clearFieldErrors();
   var u = $('a_user').value.trim(), p = $('a_pass').value, p2 = $('a_pass2').value;
   var q = $('a_q').value.trim(), a = $('a_a').value;
-  if(!u) return toast('请填写用户名', 'bad');
-  if(p.length < 8) return toast('密码至少 8 位', 'bad');
-  if(p !== p2) return toast('两次输入的密码不一致', 'bad');
-  if(!q) return toast('请填写安全问题', 'bad');
-  if(!a) return toast('请填写安全问题答案', 'bad');
+  var issue = usernameIssue(u);
+  if(issue) return fieldError('a_user', issue);
+  if(p.length < 8) return fieldError('a_pass', '密码至少 8 位');
+  if(p.length > 128) return fieldError('a_pass', '密码最多 128 位');
+  if(p !== p2) return fieldError('a_pass2', '两次输入的密码不一致');
+  if(!q) return fieldError('a_q', '请填写安全问题');
+  if(q.length < 2) return fieldError('a_q', '安全问题至少 2 个字');
+  if(!a) return fieldError('a_a', '请填写安全问题答案');
   busyBtn(btn, true, '注册中…');
   fetchJson('/api/auth/register', 'POST', { username: u, password: p, question: q, answer: a }).then(function(r){
     toast('注册成功，已自动登录', 'ok');
     return finishLogin(r);
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    authServerError(e);
   });
 }
 function recoveryLookup(){
   var btn = document.querySelector('[data-act="auth-lookup"]');
+  clearFieldErrors();
   var u = $('r_user').value.trim();
-  if(!u) return toast('请输入用户名', 'bad');
+  if(!u) return fieldError('r_user', '请输入用户名或邮箱');
   busyBtn(btn, true, '查询中…');
   fetchJson('/api/auth/recovery?username=' + encodeURIComponent(u)).then(function(r){
     RECOVERY = { username: r.username, question: r.question };
     showAuth('recover2');
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    if(e.code === 'no_recovery') fieldError('r_user', e.message);
+    else authWarn(e.message || '查询失败，请稍后重试', 'bad');
   });
 }
 function recoveryReset(){
   var btn = document.querySelector('[data-act="auth-recover"]');
+  clearFieldErrors();
   var a = $('r_a').value, p = $('r_new').value, p2 = $('r_new2').value;
-  if(!a) return toast('请填写安全问题答案', 'bad');
-  if(p.length < 8) return toast('新密码至少 8 位', 'bad');
-  if(p !== p2) return toast('两次输入的新密码不一致', 'bad');
+  if(!a) return fieldError('r_a', '请填写安全问题答案');
+  if(p.length < 8) return fieldError('r_new', '新密码至少 8 位');
+  if(p.length > 128) return fieldError('r_new', '新密码最多 128 位');
+  if(p !== p2) return fieldError('r_new2', '两次输入的新密码不一致');
   busyBtn(btn, true, '重置中…');
   fetchJson('/api/auth/recover', 'POST', { username: RECOVERY.username, answer: a, new_password: p }).then(function(){
     toast('密码已重置，请使用新密码登录', 'ok');
     showAuth('login');
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    if(e.code === 'bad_answer') fieldError('r_a', e.message);
+    else authWarn(e.message || '重置失败，请稍后重试', 'bad');
   });
 }
 function emergencyLogin(){
@@ -2394,7 +2495,7 @@ function openAccountModal(i){
   var h = '<h3>' + (isNew ? '新建账号' : '编辑账号') + '</h3><p class="msub">' +
     (isNew ? '创建后把用户名与初始密码交给成员即可使用' : '账号：' + esc(a.username)) + '</p><div class="grid">';
   if(isNew){
-    h += '<label>用户名<input id="aa_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线"></label>' +
+    h += '<label>用户名或邮箱<input id="aa_user" type="text" maxlength="254" placeholder="用户名或 name@example.com"><span class="hint">2~24 位中英文、数字、下划线或短横线；也可填写邮箱地址</span></label>' +
       '<label>初始密码<input id="aa_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>';
   }
   var planOpts = '<option value="">不指定（手动配额）</option>';
@@ -2438,6 +2539,7 @@ function openAccountModal(i){
 }
 function saveAccount(){
   var isNew = editingAccount < 0;
+  clearFieldErrors($('modalBox'));
   var role = $('aa_role').value === 'admin' ? 'admin' : 'user';
   var quota = Math.max(0, parseInt($('aa_quota').value, 10) || 0);
   var q = ($('aa_q').value || '').trim();
@@ -2447,8 +2549,10 @@ function saveAccount(){
   if(isNew){
     var u = ($('aa_user').value || '').trim();
     var p = $('aa_pass').value;
-    if(!u) return toast('请填写用户名', 'bad');
-    if(p.length < 8) return toast('初始密码至少 8 位', 'bad');
+    var issue = usernameIssue(u);
+    if(issue) return fieldError('aa_user', issue);
+    if(p.length < 8) return fieldError('aa_pass', '初始密码至少 8 位');
+    if(p.length > 128) return fieldError('aa_pass', '初始密码最多 128 位');
     payload = { action: 'create', username: u, password: p, role: role, quota_tokens: quota };
     if(planId) payload.plan_id = planId;
     if(q || ans){ payload.question = q; payload.answer = ans; }
@@ -2467,7 +2571,13 @@ function saveAccount(){
     return loadAll();
   }).catch(function(e){
     busyBtn(btn, false);
-    toast(e.message, 'bad');
+    var byCode = {
+      bad_username: 'aa_user', username_taken: 'aa_user',
+      bad_password: 'aa_pass', bad_question: 'aa_q', bad_answer: 'aa_a'
+    };
+    var id = byCode[e.code];
+    if(id && $(id)) fieldError(id, e.message);
+    else toast(e.message, 'bad');
   });
 }
 function openResetAccountPw(i){

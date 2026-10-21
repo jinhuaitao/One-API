@@ -763,7 +763,51 @@ const normalizeAnswer = (s) =>
     .toLowerCase()
     .replace(/\s+/g, '');
 
-const validUsername = (u) => /^[A-Za-z0-9_\u4e00-\u9fa5-]{2,24}$/.test(u);
+/**
+ * 用户名支持两种形式：
+ * 1) 普通用户名：2~24 位中英文、数字、下划线、短横线；
+ * 2) 邮箱地址：总长 ≤254，@ 前 ≤64，域名需含点号且以 2 位以上字母结尾。
+ * 返回空串表示合法，否则返回可直接展示给用户的具体原因。
+ */
+function usernameError(raw) {
+  const u = String(raw == null ? '' : raw).trim();
+  if (!u) return '请填写用户名或邮箱';
+  if (u.includes('@')) {
+    if (u.length > 254) return '邮箱地址最长 254 个字符';
+    if (/\s/.test(u)) return '邮箱地址不能包含空格';
+    const at = u.lastIndexOf('@');
+    const local = u.slice(0, at);
+    const domain = u.slice(at + 1);
+    if (!local) return '邮箱缺少 @ 前的账号部分，例如 name@example.com';
+    if (local.length > 64) return '邮箱 @ 前的部分最多 64 个字符';
+    if (!/^[A-Za-z0-9._%+-]+$/.test(local)) return '邮箱 @ 前只能使用字母、数字和 . _ % + -';
+    if (local.startsWith('.') || local.endsWith('.') || local.includes('..')) {
+      return '邮箱 @ 前的点号不能位于开头、结尾或连续出现';
+    }
+    if (!domain) return '邮箱缺少 @ 后的域名，例如 name@example.com';
+    if (domain.length > 253) return '邮箱域名最长 253 个字符';
+    if (!/^[A-Za-z0-9.-]+$/.test(domain)) return '邮箱域名只能包含字母、数字、点号和短横线';
+    const labels = domain.split('.');
+    if (labels.length < 2 || labels.some((x) => !x)) {
+      return '邮箱域名格式不正确，例如 example.com';
+    }
+    if (labels.some((x) => x.length > 63)) return '邮箱域名单段最长 63 个字符';
+    if (labels.some((x) => x.startsWith('-') || x.endsWith('-'))) {
+      return '邮箱域名中的短横线不能位于开头或结尾';
+    }
+    if (!/^[A-Za-z]{2,}$/.test(labels[labels.length - 1])) {
+      return '邮箱域名结尾需为 2 位以上字母，例如 .com';
+    }
+    return '';
+  }
+  if (u.length < 2) return '用户名至少 2 个字符；也可填写邮箱地址';
+  if (u.length > 24) return '用户名最多 24 个字符；如需更长请使用邮箱';
+  if (!/^[A-Za-z0-9_\u4e00-\u9fa5-]+$/.test(u)) {
+    return '用户名只能包含中英文、数字、下划线或短横线；如需使用 @ 或点号请填写完整邮箱';
+  }
+  return '';
+}
+
 const validPassword = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
 const validQuestion = (q) => typeof q === 'string' && q.trim().length >= 2 && q.trim().length <= 100;
 const validAnswer = (a) => {
@@ -3177,9 +3221,8 @@ async function handleAuth(env, ctx, request) {
       return err('请求体应为 JSON 对象', 400, 'invalid_body');
     }
     const username = String(body.username || '').trim();
-    if (!validUsername(username)) {
-      return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
-    }
+    const usernameIssue = usernameError(username);
+    if (usernameIssue) return err(usernameIssue, 400, 'bad_username');
     if (!validPassword(body.password)) {
       return err('密码长度需为 8~128 位', 400, 'bad_password');
     }
@@ -3228,7 +3271,7 @@ async function handleAuth(env, ctx, request) {
       (acc && acc.password) || DUMMY_SECRET
     );
     if (!acc || !passOk) {
-      return err('用户名或密码不正确', 401, 'bad_credentials');
+      return err('账号或密码错误，请检查用户名/邮箱与密码后重试', 401, 'bad_credentials');
     }
     if (acc.enabled === false) {
       return err('该账号已被禁用，请联系管理员', 403, 'account_disabled');
@@ -3278,9 +3321,8 @@ async function handleAuth(env, ctx, request) {
       return err('请求体应为 JSON 对象', 400, 'invalid_body');
     }
     const username = String(body.username || '').trim();
-    if (!validUsername(username)) {
-      return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
-    }
+    const usernameIssue = usernameError(username);
+    if (usernameIssue) return err(usernameIssue, 400, 'bad_username');
     if (!validPassword(body.password)) {
       return err('密码长度需为 8~128 位', 400, 'bad_password');
     }
@@ -3774,9 +3816,8 @@ async function handleAdmin(env, ctx, request) {
 
     if (action === 'create') {
       const username = String(body.username || '').trim();
-      if (!validUsername(username)) {
-        return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
-      }
+      const usernameIssue = usernameError(username);
+      if (usernameIssue) return err(usernameIssue, 400, 'bad_username');
       if (!validPassword(body.password)) {
         return err('密码长度需为 8~128 位', 400, 'bad_password');
       }

@@ -94,10 +94,11 @@ await r2.put(
 await r2.put('data/keys.json', '[]');
 
 /* ---------------- 请求助手 ---------------- */
-async function call(path, { method = 'GET', token, adminKey, body } = {}) {
+async function call(path, { method = 'GET', token, adminKey, body, ip } = {}) {
   const headers = {};
   if (token) headers['X-Session-Token'] = token;
   if (adminKey) headers['X-Admin-Key'] = adminKey;
+  if (ip) headers['X-Forwarded-For'] = ip;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const res = await handler.fetch(
     new Request('https://gw.example' + path, {
@@ -157,8 +158,8 @@ let bobKey = '';
 async function updateSettings(patch) {
   return call('/api/admin/settings', { method: 'POST', token: adminToken, body: patch });
 }
-async function register(body) {
-  return call('/api/auth/register', { method: 'POST', body });
+async function register(body, ip) {
+  return call('/api/auth/register', { method: 'POST', body, ip });
 }
 async function adminAccounts() {
   return call('/api/admin/accounts', { token: adminToken });
@@ -578,6 +579,95 @@ async function adminAccounts() {
   r = await call('/api/auth/login', { method: 'POST', body: { username: 'root', password: ADMIN_PW } });
   assert.equal(r.status, 401, '被备份覆盖掉的账号不应还能登录');
   console.log('ok 6) 备份含账号（仅哈希）、恢复需确认且校验管理员/完整性、恢复后清会话');
+}
+
+/* ---------------- 7) 邮箱用户名与登录错误提示 ---------------- */
+{
+  let r = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: 'alice', password: ALICE_PW3 },
+  });
+  assert.equal(r.status, 200, r.text);
+  adminToken = r.data.token;
+
+  // 具体哪一条不符合：管理员建号与注册共用同一套校验
+  const invalid = [
+    ['a', /至少 2 个字符/],
+    ['x'.repeat(25), /最多 24 个字符/],
+    ['bad name', /只能包含中英文/],
+    ['user@example', /域名需包含点号|域名格式/],
+    ['user@example.c', /2 位以上字母/],
+    ['user@.com', /域名格式/],
+    ['.user@example.com', /点号不能位于开头/],
+    ['user@example..com', /域名格式/],
+    ['user@exa_mple.com', /域名只能包含/],
+  ];
+  for (const [username, pattern] of invalid) {
+    r = await call('/api/admin/accounts', {
+      method: 'POST',
+      token: adminToken,
+      body: { action: 'create', username, password: BOB_PW, role: 'user' },
+    });
+    assert.equal(r.status, 400, username);
+    assert.equal(r.data.error.code, 'bad_username', username);
+    assert.match(r.data.error.message, pattern, username + ' → ' + r.data.error.message);
+  }
+
+  const email = 'Alice.Example+tag@Example.COM';
+  const EMAIL_IP = '203.0.113.9';
+  r = await register(
+    { username: email, password: BOB_PW, question: '出生城市？', answer: '杭州' },
+    EMAIL_IP
+  );
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.data.user.username, email, '邮箱应原样保留大小写展示');
+  assert.equal(r.data.user.role, 'user');
+  const emailId = r.data.user.id;
+
+  r = await register(
+    { username: 'alice.example+TAG@example.com', password: BOB_PW, question: 'q？', answer: 'a' },
+    EMAIL_IP
+  );
+  assert.equal(r.status, 409, '邮箱账号也应大小写不敏感去重');
+  assert.equal(r.data.error.code, 'username_taken');
+
+  r = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: 'alice.example+tag@example.com', password: BOB_PW },
+  });
+  assert.equal(r.status, 200, '应可用邮箱（大小写不敏感）登录');
+  assert.equal(r.data.user.id, emailId);
+
+  r = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: email, password: 'wrong-pass-9' },
+  });
+  assert.equal(r.status, 401);
+  assert.equal(r.data.error.code, 'bad_credentials');
+  assert.match(r.data.error.message, /账号或密码错误/);
+
+  r = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: 'nobody@example.com', password: BOB_PW },
+  });
+  assert.equal(r.status, 401);
+  assert.equal(r.data.error.message, '账号或密码错误，请检查用户名/邮箱与密码后重试', '不存在账号与密码错误应给出同一提示');
+
+  r = await call('/api/admin/accounts', {
+    method: 'POST',
+    token: adminToken,
+    body: { action: 'create', username: 'ops@example.com', password: BOB_PW, role: 'user' },
+  });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.data.account.username, 'ops@example.com', '管理员建号也应支持邮箱');
+
+  r = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: 'OPS@example.com', password: BOB_PW },
+  });
+  assert.equal(r.status, 200, '管理员创建的邮箱账号应可登录');
+
+  console.log('ok 7) 邮箱用户名：格式校验定位、大小写去重、邮箱登录、账号或密码错误提示');
 }
 
 console.log('accounts: all passed');
