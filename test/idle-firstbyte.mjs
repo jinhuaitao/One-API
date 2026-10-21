@@ -117,4 +117,51 @@ const block = (content, model = 'real') =>
   console.log('ok 4) 上游中途报错 → upstream_error 收尾，错误原文已透传');
 }
 
+// 5) 上游以「无尾随空行」收尾（末尾恰是 data: [DONE]）：最后一个事件块
+//    仍必须带 \n\n 分隔符，否则标准 SSE 客户端不会派发最后一个事件
+{
+  const t = tracker();
+  const raw =
+    'data: {"id":"1","model":"real","choices":[{"delta":{"content":"A"}}]}\n\n' +
+    'data: {"id":"1","model":"real","choices":[{"delta":{"content":"B"}}]}\n\n' +
+    'data: [DONE]';
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode(raw.slice(0, raw.length - 30)));
+      c.enqueue(enc.encode(raw.slice(raw.length - 30)));
+      c.close();
+    },
+  });
+  const out = rewriteOpenAISSE(src, 'gw', t.cb, 2000, 0, 2000);
+  const text = await collect(out);
+  const fin = await t.promise;
+  assert.equal(fin.finish, 'complete');
+  assert.ok(text.includes('"content":"A"') && text.includes('"content":"B"'));
+  assert.ok(text.endsWith('data: [DONE]\n\n'), '尾部 [DONE] 之后必须有事件分隔符');
+  console.log('ok 5) 无尾随空行的 [DONE] 尾块已补分隔符');
+}
+
+// 6) 上游既不发 [DONE] 也无尾随空行：网关补发 [DONE] 前，残块同样要有分隔符
+{
+  const t = tracker();
+  const raw =
+    'data: {"id":"1","model":"real","choices":[{"delta":{"content":"A"}}]}\n\n' +
+    'data: {"id":"1","model":"real","choices":[{"delta":{"content":"B"}}]}';
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode(raw));
+      c.close();
+    },
+  });
+  const out = rewriteOpenAISSE(src, 'gw', t.cb, 2000, 0, 2000);
+  const text = await collect(out);
+  const fin = await t.promise;
+  assert.equal(fin.finish, 'complete');
+  assert.ok(
+    text.includes('"content":"B"}}]}\n\ndata: [DONE]\n\n'),
+    '残块与补发的 [DONE] 之间必须有事件分隔符'
+  );
+  console.log('ok 6) 无 [DONE] 无尾随空行：残块已补分隔符并补发 [DONE]');
+}
+
 console.log('idle-firstbyte: all passed');

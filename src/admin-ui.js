@@ -1849,6 +1849,8 @@ function saveChannel(){
   var models = $('m_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
   if(!models.length){ toast('请至少填写一个模型（或 *）', 'bad'); return; }
   var keyStr = $('m_key').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean).join(',');
+  // 优先级 0 是合法值（越小越优先），不能用 || 兜底——否则填 0 会被静默改成 100
+  var prio = parseInt($('m_prio').value, 10);
   var c = {
     id: editingCh >= 0 ? S.channels[editingCh].id : 'ch_' + Date.now().toString(36),
     name: name,
@@ -1859,7 +1861,7 @@ function saveChannel(){
     model_map: readPairs('mapRows', 'm_k', 'm_v'),
     headers: readPairs('hdrRows', 'h_k', 'h_v'),
     default_max_tokens: parseInt($('m_maxt').value, 10) || 4096,
-    priority: parseInt($('m_prio').value, 10) || 100,
+    priority: Number.isFinite(prio) ? prio : 100,
     weight: Math.max(1, parseInt($('m_weight').value, 10) || 1),
     enabled: $('m_enabled').checked
   };

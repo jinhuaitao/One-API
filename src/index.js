@@ -2138,10 +2138,13 @@ function rewriteOpenAISSE(
       buffer += norm.flush();
       if (buffer.trim()) {
         if (isDoneBlock(buffer)) sawDone = true;
-        controller.enqueue(encoder.encode(rewriteSseBlock(buffer, model, capture)));
+        // 尾块必须补上事件分隔符：上游可能以「无尾随空行」的方式结束流
+        // （末尾恰好是 data: [DONE] 或最后一个数据块），此时 sawDone 已置位、
+        // 下方不再补发，若不补 \n\n，标准 SSE 客户端不会派发最后一个事件
+        controller.enqueue(encoder.encode(rewriteSseBlock(buffer, model, capture) + '\n\n'));
       }
       // 部分兼容上游不会发送 [DONE]，由网关补上，避免客户端一直等不到流结束
-      if (!sawDone) controller.enqueue(encoder.encode('\n\ndata: [DONE]\n\n'));
+      if (!sawDone) controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       done('complete');
     },
   });
@@ -2211,17 +2214,23 @@ async function forwardOpenAI(channel, apiKey, path, payload, settings) {
 
   // 降级：上游不接受 stream_options 时去掉该参数重试。
   // 不局限于 HTTP 400 —— 实测上游可能返回 422 / 404，或用别的文案报「参数不支持」。
+  // 401 / 403 是密钥问题（文案常含 "invalid"），不能据此判定上游不支持
+  // stream_options：误判会把渠道记入 usageUnsupportedChannels（此后 usage
+  // 统计静默丢失），还会多一次注定失败的重试。
   // 只克隆响应体做探测，不消耗原响应，保证失败路径仍能拿到完整错误信息。
-  if (wantUsage && res.status >= 400 && res.status < 500) {
+  if (wantUsage && res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403) {
     let text = '';
     try {
       text = await res.clone().text();
     } catch {
       // 拿不到文本就只按状态码判断
     }
+    // 400/404/422 本身就是「参数不被接受」的强信号；其余 4xx 需要文本
+    // 明确提及参数类关键词（stream_options / include_usage / unknown / extra…）
+    const paramish = res.status === 400 || res.status === 404 || res.status === 422;
     const looksUnsupported =
-      res.status === 400 ||
-      /stream_options|include_usage|unsupported|unrecognized|unknown|invalid|extra/i.test(
+      paramish ||
+      /stream_options|include_usage|unsupported|unrecognized|unknown|extra/i.test(
         text
       );
     if (looksUnsupported) {
@@ -2714,6 +2723,8 @@ function matchLog(l, f) {
   if (f.ok === 'ok' && !l.ok) return false;
   if (f.ok === 'fail' && l.ok) return false;
   if (f.stream === '1' && !l.stream) return false;
+  // 「非流式」筛选：控制台的 stream=0 此前没有对应分支，选了等于没筛
+  if (f.stream === '0' && l.stream) return false;
   if (f.finish === 'abnormal' && (!l.finish || l.finish === 'complete')) return false;
   if (f.model && String(l.model || '').toLowerCase().indexOf(f.model.toLowerCase()) < 0)
     return false;

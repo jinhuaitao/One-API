@@ -59,7 +59,7 @@ async function drain() {
 }
 
 let upstreamMode = 'ok';
-const calls = { upstream: 0, telegram: [] };
+const calls = { upstream: 0, telegram: [], bodies: [] };
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (u.includes('api.telegram.org')) {
@@ -69,9 +69,14 @@ globalThis.fetch = async (url, init) => {
   if (u.startsWith('https://up.example')) {
     calls.upstream++;
     const body = String((init && init.body) || '');
+    calls.bodies.push(body);
     // 保活/巡检发的是真实小请求（content: ping），与普通调用区分开
     if (!body.includes('"content":"ping"') && upstreamMode === 'fail') {
       return new Response('internal-upstream-detail-xyz', { status: 500 });
+    }
+    // 鉴权失败：文案含 "invalid"，此前会被误判为「上游不支持 stream_options」
+    if (!body.includes('"content":"ping"') && upstreamMode === 'authfail') {
+      return new Response('invalid api key', { status: 401 });
     }
     return new Response(
       JSON.stringify({
@@ -200,6 +205,68 @@ await r2.put(
     .find((e) => String(e.error || '').includes('internal-upstream-detail-xyz'));
   assert.ok(entry, '管理日志里应保留完整上游错误详情');
   console.log('ok 3) 下游已脱敏（无渠道名/无上游原文），详情保留在管理日志');
+}
+
+/* ---------------- 4) 日志筛选：stream=0（非流式）此前被服务端忽略 ---------------- */
+{
+  // 预置一真一假两条流式标记的日志（key 命名只需落在当天前缀下）
+  await r2.put(
+    `logs/${today}/0000000000005-s.json`,
+    JSON.stringify({ ts: new Date().toISOString(), request_id: 'r_stream', model: 'm1', channel: '主渠道', ok: true, stream: true, finish: 'complete', tokens: 5, cost: 0, ms: 100, key_name: 'admin', is_admin: true })
+  );
+  await r2.put(
+    `logs/${today}/0000000000004-n.json`,
+    JSON.stringify({ ts: new Date().toISOString(), request_id: 'r_plain', model: 'm1', channel: '主渠道', ok: true, stream: false, tokens: 6, cost: 0, ms: 100, key_name: 'admin', is_admin: true })
+  );
+  const hdr = { 'X-Admin-Key': 'adm-secret' };
+  const ask = async (qs) => {
+    const res = await handler.fetch(
+      new Request('https://gw.example/api/admin/logs/summary?date=' + today + '&' + qs, { headers: hdr }),
+      env,
+      ctx
+    );
+    await drain();
+    return { status: res.status, data: JSON.parse(await res.text()) };
+  };
+  let r = await ask('stream=1');
+  assert.equal(r.status, 200);
+  assert.ok(r.data.logs.length >= 1, 'stream=1 应至少返回预置的流式日志');
+  assert.ok(r.data.logs.every((l) => l.stream === true), 'stream=1 不应混入非流式日志');
+
+  r = await ask('stream=0');
+  assert.equal(r.status, 200);
+  assert.ok(r.data.logs.some((l) => l.request_id === 'r_plain'), 'stream=0 应返回预置的非流式日志');
+  assert.ok(!r.data.logs.some((l) => l.stream === true), 'stream=0 不应混入流式日志');
+  console.log('ok 4) 日志筛选 stream=0 / stream=1 均正确生效');
+}
+
+/* ---------------- 5) 401 鉴权失败不得触发 stream_options 降级重试 ---------------- */
+{
+  upstreamMode = 'authfail';
+  calls.upstream = 0;
+  calls.bodies = [];
+  const res = await handler.fetch(
+    new Request('https://gw.example/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer adm-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'm1', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    }),
+    env,
+    ctx
+  );
+  await drain();
+  assert.equal(res.status, 502, '鉴权失败最终应 502');
+  // 渠道配了 2 个 Key：401 后按设计换下一个 Key（2 次），但每个 Key
+  // 都不应再触发「去掉 stream_options 再试一次」的降级重试（旧代码是 4 次）
+  assert.equal(calls.upstream, 2, '401 每个 Key 只应调用一次上游，不应有降级重试');
+  assert.ok(
+    calls.bodies.every((b) => b.includes('"stream_options"')),
+    '每次流式请求都应携带 stream_options（渠道未被误记为不支持 usage）'
+  );
+  const body = await res.text();
+  assert.ok(!body.includes('invalid api key'), '下游不应看到上游错误原文');
+  upstreamMode = 'ok';
+  console.log('ok 5) 401 不再被误判为 stream_options 不支持（无降级重试、不误标渠道）');
 }
 
 console.log('background: all passed');
