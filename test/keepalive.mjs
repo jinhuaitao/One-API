@@ -121,4 +121,48 @@ const block = (content, model = 'real') =>
   console.log('ok 4) Anthropic 翻译 + ping 转发 + usage 提取通过');
 }
 
+// 5) 正常完成的流也必须带 stream_meta（bytes / first_byte）——README 承诺的诊断字段
+//    此前 flush 提前结算会挡住守卫带 meta 的结算，成功流的 stream_meta 恒为 null
+{
+  const t = tracker();
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode(block('A')));
+      c.enqueue(enc.encode(block('B')));
+      c.close();
+    },
+  });
+  const out = rewriteOpenAISSE(src, 'gw', t.cb, 2000, 0, 2000);
+  const text = await collect(out);
+  const fin = await t.promise;
+  assert.equal(fin.finish, 'complete');
+  assert.ok(fin.meta && fin.meta.bytes > 0, '正常完成也应有已转发字节数');
+  assert.equal(fin.meta.first_byte, true, '正常完成 first_byte 应为 true');
+  assert.ok(text.includes('"content":"A"') && text.includes('"content":"B"'));
+  console.log('ok 5) 正常完成的流式日志带 stream_meta（bytes/first_byte）');
+}
+
+// 6) Anthropic 正常完成同样带 stream_meta 且 usage 不丢
+{
+  const t = tracker();
+  const sse =
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":5,"output_tokens":1}}}\n\n' +
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n' +
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode(sse));
+      c.close();
+    },
+  });
+  const out = anthropicStreamToOpenAI(src, 'gw', t.cb, 2000, 0, 2000);
+  await collect(out);
+  const fin = await t.promise;
+  assert.equal(fin.finish, 'complete');
+  assert.deepEqual(fin.usage, { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 }, 'usage 应随守卫结算一并上报');
+  assert.ok(fin.meta && fin.meta.bytes > 0 && fin.meta.first_byte === true, 'Anthropic 正常完成也应带 stream_meta');
+  console.log('ok 6) Anthropic 正常完成：usage 与 stream_meta 同时上报');
+}
+
 console.log('keepalive: all passed');

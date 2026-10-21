@@ -1721,16 +1721,16 @@ function anthropicStreamToOpenAI(
     flush(controller) {
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       const total = inputTokens + outputTokens;
-      settleUsage(
-        total > 0
-          ? {
-              prompt_tokens: inputTokens,
-              completion_tokens: outputTokens,
-              total_tokens: total,
-            }
-          : null,
-        'complete'
-      );
+      // usage 暂存，不在此处结算：与 rewriteOpenAISSE 同样改由 guardSSEStream
+      // 在流真正结束时带上 { bytes, first_byte } 统一上报，否则正常完成的流式
+      // 日志 stream_meta 恒为 null
+      finalUsage = total > 0
+        ? {
+            prompt_tokens: inputTokens,
+            completion_tokens: outputTokens,
+            total_tokens: total,
+          }
+        : null;
     },
   });
 
@@ -1738,13 +1738,14 @@ function anthropicStreamToOpenAI(
   // （正常路径由 flush 先结算 usage，settleUsage 自带幂等保护）；
   // pipeTo 的拒绝原因同样留存并合并透传，理由同 rewriteOpenAISSE。
   let pipeError = '';
+  let finalUsage = null; // flush 时暂存 usage，交由 guardSSEStream 结束时带 stream_meta 一并上报
   upstreamBody.pipeTo(transform.writable).catch((e) => {
     pipeError = String((e && e.message) || e || '').slice(0, 200);
   });
   return guardSSEStream(transform.readable, {
     onFinish: (reason, meta) =>
       settleUsage(
-        null,
+        finalUsage,
         reason,
         pipeError && !(meta && meta.error) ? { ...(meta || {}), error: pipeError } : meta
       ),
@@ -2145,7 +2146,10 @@ function rewriteOpenAISSE(
       }
       // 部分兼容上游不会发送 [DONE]，由网关补上，避免客户端一直等不到流结束
       if (!sawDone) controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-      done('complete');
+      // 注意：这里不调用 done('complete')。此前在 flush 里提前结算，guardSSEStream
+      // 随后带 { bytes, first_byte } 的结算会被幂等保护挡掉，导致正常完成的流式
+      // 日志 stream_meta 恒为 null（README 承诺的诊断字段缺失）。
+      // 改为由守卫在流真正结束后统一结算，usage 变量已在 transform 中被 capture 填好。
     },
   });
 
