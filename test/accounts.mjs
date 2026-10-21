@@ -532,7 +532,7 @@ async function adminAccounts() {
   let r = await call('/api/admin/backup', { token: adminToken });
   assert.equal(r.status, 200);
   const snapshot = JSON.parse(r.text);
-  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.version, 3);
   assert.equal(snapshot.type, 'oneapi-gateway-backup');
   assert.ok(Array.isArray(snapshot.accounts) && snapshot.accounts.length === 2);
   assert.ok(snapshot.accounts.find((a) => a.username === 'root').password.hash);

@@ -1,6 +1,6 @@
 # OneAPI Gateway（Cloudflare Workers + R2）
 
-One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转移、密钥与配额管理，
+One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转移、密钥、配额与套餐管理，
 全部运行在 Cloudflare Workers 上，数据存放在 R2。
 
 **核心特性：控制台连接 GitHub 部署时，R2 会被自动创建并自动绑定，无需手动操作。**
@@ -67,22 +67,41 @@ One-API 风格的 AI 网关：OpenAI 兼容接口、多渠道路由与故障转�
 - 凭据只存哈希：密码与安全答案用 PBKDF2-SHA256 + 随机盐存储，
   会话只存 token 的 SHA-256；`ADMIN_KEY` 仅作为忘记密码时的应急凭据保留
 
+### 套餐（审核制）
+- **套餐内容**：名称、描述、价格、Token 配额、有效期（天，`0` = 长期有效）、账号级 RPM、
+  可用模型白名单；管理员可随时创建、编辑、上下架
+- **用户申请**：普通用户在「套餐」页看到启用中的套餐，提交申请时可附备注；同一账号同时
+  只能有一条待审核申请，可自行取消
+- **管理员审核**：确认收款后点「通过」即生效，同时开启新的计费周期（该账号名下密钥用量清零）；
+  也可填写原因驳回。删除套餐会自动驳回其待审核申请
+- **条款快照**：申请与审核都按提交时的套餐条款执行，之后修改套餐不影响已提交的申请和
+  已生效周期；同套餐续费时有效期从原到期时间顺延，换套餐则从审核通过时重新起算
+- **生效限制**：套餐配额按账号名下所有密钥合计；到期后该账号名下密钥立即停止调用
+  （`403 plan_expired`）；套餐模型白名单与密钥模型白名单取交集；账号级 RPM 与密钥 RPM
+  各自独立计数，任意一层超限即返回 `429 rate_limited`
+- 管理员也可在「账号管理」里直接为账号指派 / 续期 / 清除套餐；清除套餐会保留当前配额
+
 ### 控制台
 - 中文管理后台 `/admin`：账号登录 + 侧边导航，按角色显示可用页面，明暗主题一键切换
 - 概览：请求/成功率/Tokens/费用/延迟指标卡、用量趋势折线图（7/14/30 天可切换）、
   渠道状态、Top 模型 / Top 密钥
 - 渠道、密钥、日志、账号均支持搜索、筛选；日志支持按天翻页、关键字搜索、导出 CSV
 - 普通用户专属「我的密钥」：自助创建、改名、启停、删除、查看用量与调用示例
+- 普通用户「套餐」：查看当前套餐与到期时间、可选套餐、提交 / 取消申请、查看审核记录；
+  到期时在密钥页与套餐页给出续费提示
+- 管理员「套餐管理」：套餐 CRUD、上下架、待审申请通过 / 驳回、申请历史
+- 账号管理支持按套餐筛选字段：套餐名称、到期时间、剩余天数，并可在建号 / 编辑时直接指派套餐
 - 设置页：超时、重试、日志保留期、定价表、注册/找回开关、默认用户配额、日志清理
-- 配置导入 / 导出（渠道 + 密钥 + 设置）；备份导出 / 恢复（含账号，恢复后清空会话）
+- 配置导入 / 导出（渠道 + 密钥 + 设置）；备份导出 / 恢复（含账号、套餐与申请记录，恢复后清空会话）
 
 ### 数据（全部在 R2）
 - `data/channels.json` 渠道 · `data/keys.json` 密钥 · `data/settings.json` 设置
 - `data/accounts.json` 账号（密码/安全答案均为哈希） · `data/sessions.json` 会话（仅 token 哈希）
+- `data/plans.json` 套餐 · `data/plan-requests.json` 套餐申请与审核记录
 - `data/stats/<日期>.json` 按天聚合统计（请求 / Tokens / 费用 / 流式 / 流式异常结束 / 分模型分渠道分密钥）
 - `logs/<日期>/<倒序时间戳>.json` 请求日志（key 倒序，列表天然按时间从新到旧）；
   流式请求额外记录 `finish`（`complete` / `client_abort` / `upstream_error` / `timeout`）
-- `backup/<日期>.json` 每日自动备份（含渠道、密钥、设置、账号）
+- `backup/<日期>.json` 每日自动备份（含渠道、密钥、设置、账号、套餐与申请记录）
 
 ## 自动创建 R2 的原理
 
@@ -188,18 +207,22 @@ npm run deploy   # 先 ensure-r2 再 wrangler deploy
 ### 测试与预览
 
 ```bash
-npm test              # 全量回归：账号体系 + 流式 + 定时任务，内存版 R2 + 模拟上游，无需任何依赖
+npm test              # 全量回归：账号体系 + 套餐 + 流式 + 定时任务，内存版 R2 + 模拟上游，无需任何依赖
 npm run test:accounts # 账号体系：初始化 / 登录 / 注册开关 / 问答找回 / 角色与配额 / 备份恢复
+npm run test:plans    # 套餐：CRUD / 申请审核 / 配额·有效期·RPM·模型限制 / 备份恢复
 npm run test:stream   # 流式（SSE）回归测试：5 组场景 / 22 项断言，无需任何依赖
 npm run preview       # 生成 preview/admin-preview.html（带模拟数据的控制台静态预览）
 ```
 
-- `npm test` 会依次跑通账号体系、流式链路与定时任务。
+- `npm test` 会依次跑通账号体系、套餐、流式链路与定时任务。
 - `npm run test:accounts` 覆盖：首次初始化强制问答、密码/安全答案/会话 token 只存哈希、
   注册开关与默认配额、用户名大小写去重、问答找回（答案归一化、旧会话失效）、
   修改密码 / 安全问题、普通用户只能操作自己名下的密钥、账号级配额与禁用、
   单账号密钥上限、末位管理员 / 自我删除守卫、删除账号级联清理，
   以及含账号的备份导出与恢复校验。
+- `npm run test:plans` 覆盖：套餐 CRUD 与上下架、用户申请 / 取消 / 待审互斥、
+  审核按申请快照生效并清零用量、套餐配额与到期停用、账号级 RPM、模型白名单与密钥白名单取交集、
+  续费 / 换套餐 / 清除套餐、下架自动驳回、备份 v3（含套餐与申请）恢复及 v2 兼容。
 - `npm run test:stream` 直接导入真实的 `src/index.js`，用受控的网络分片与上游故障
   验证流式链路：分片切断、CRLF 跨分片、上游中途报错、客户端断开、静默超时、
   补发 `[DONE]`、Anthropic 翻译与 ping 保活等。改动流式相关代码后请务必跑一遍。
@@ -226,10 +249,12 @@ npm run preview       # 生成 preview/admin-preview.html（带模拟数据的�
 | `GET /api/auth/recovery?username=` · `POST /api/auth/recover` | 问答找回：取安全问题 / 校验答案并重置密码 |
 | `GET /api/auth/me` · `POST /api/auth/change-password` · `POST /api/auth/security` | 当前身份 / 修改密码 / 修改安全问题 |
 | `GET/POST /api/user/keys` | 普通用户查询 / 管理自己名下的密钥（`create` / `rename` / `toggle` / `delete`） |
+| `GET/POST /api/user/plans` | 普通用户查看套餐与申请记录 / 提交或取消申请（`request` / `cancel`） |
 | `GET/POST /api/admin/channels` | 渠道查询 / 覆盖保存 |
 | `GET/POST /api/admin/keys` | 密钥查询 / 覆盖保存 |
 | `GET /api/admin/ping` | 鉴权探针：校验当前会话或应急 `X-Admin-Key`，不读业务数据 |
 | `GET/POST /api/admin/accounts` | 账号列表 / 管理（`create` / `update` / `reset-password` / `delete`） |
+| `GET/POST /api/admin/plans` | 套餐列表与申请 / 套餐 CRUD 与审核（`create` / `update` / `delete` / `approve-request` / `reject-request`） |
 | `GET/POST /api/admin/settings` | 网关设置查询 / 保存 |
 | `GET /api/admin/stats?days=N` | 近 N 天聚合统计（含分模型/渠道/密钥明细） |
 | `GET /api/admin/logs/dates` | 有日志的日期列表 |
@@ -240,8 +265,8 @@ npm run preview       # 生成 preview/admin-preview.html（带模拟数据的�
 | `POST /api/admin/test-channel` | 测试单个渠道（逐个 Key） |
 | `POST /api/admin/test-all` | 批量测试所有已启用渠道 |
 | `POST /api/admin/test-route` | 按模型查看路由候选顺序并实际调用一次 |
-| `GET /api/admin/backup` · `GET /api/admin/backups` | 立即导出完整快照 / 列出并下载每日自动备份 |
-| `POST /api/admin/restore` | 恢复备份（需 `confirm: true`；带 accounts 时会清空全部会话） |
+| `GET /api/admin/backup` · `GET /api/admin/backups` | 立即导出完整快照（v3，含账号、套餐与申请）/ 列出并下载每日自动备份 |
+| `POST /api/admin/restore` | 恢复备份（需 `confirm: true`；带 accounts 时会清空全部会话；v2 备份兼容） |
 
 登录后的接口使用 `X-Session-Token` 请求头（控制台自动携带，有效期 7 天）；
 管理接口也接受应急 `X-Admin-Key`。`/api/*` 不返回 CORS 头并拒绝 OPTIONS 预检，
@@ -285,7 +310,11 @@ npm run preview       # 生成 preview/admin-preview.html（带模拟数据的�
 - **忘记管理员密码 / 被锁在后台外**：优先用登录页的「问答找回」。若安全问题也忘了，
   在 Worker 环境变量中配置 `ADMIN_KEY`，请求管理接口时带 `X-Admin-Key`，
   或直接在「账号管理」里重置密码（用应急 Key 登录控制台后选择「应急登录」）。
-  备份恢复也会整体覆盖账号并清空会话，恢复前请确认备份里至少有一个可用的管理员账号。
+  备份恢复也会整体覆盖账号与套餐并清空会话，恢复前请确认备份里至少有一个可用的管理员账号。
+- **套餐怎么生效 / 到期了会怎样**：普通用户在「套餐」页提交申请，管理员在「套餐管理」
+  确认收款后点「通过」，套餐立即生效并清零该账号名下密钥的用量。到期后该账号名下所有密钥
+  的调用会返回 `403 plan_expired`，续费（同套餐）或更换套餐后恢复；已生效账号保留审核时的
+  条款快照，管理员之后修改套餐不会追溯已生效周期。
 - **能不能关闭注册 / 关闭问答找回**：可以。「设置 → 账号与安全」分别控制
   `allow_registration` 与 `allow_password_recovery`。关闭注册后只能由管理员在「账号管理」建号；
   关闭找回后，忘记密码只能由管理员重置。

@@ -44,6 +44,8 @@ const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
 const ACCOUNTS_KEY = 'data/accounts.json';
 const SESSIONS_KEY = 'data/sessions.json';
+const PLANS_KEY = 'data/plans.json';
+const PLAN_REQUESTS_KEY = 'data/plan-requests.json';
 const STATS_PREFIX = 'data/stats/';
 const LOG_PREFIX = 'logs/';
 /** 13 位时间戳上限，用于生成「越大越新」的倒序 key */
@@ -465,12 +467,14 @@ async function ensureSeed(env) {
   if (seeded) return;
   try {
     // 三个检查彼此独立，并行发起，避免串行等待
-    const [ch, ks, st, ac, se] = await Promise.all([
+    const [ch, ks, st, ac, se, pl, pr] = await Promise.all([
       env.R2.get(CHANNELS_KEY),
       env.R2.get(KEYS_KEY),
       env.R2.get(SETTINGS_KEY),
       env.R2.get(ACCOUNTS_KEY),
       env.R2.get(SESSIONS_KEY),
+      env.R2.get(PLANS_KEY),
+      env.R2.get(PLAN_REQUESTS_KEY),
     ]);
     const writes = [];
     if (!ch) writes.push(r2PutJson(env, CHANNELS_KEY, defaultChannels()));
@@ -478,6 +482,8 @@ async function ensureSeed(env) {
     if (!st) writes.push(r2PutJson(env, SETTINGS_KEY, defaultSettings()));
     if (!ac) writes.push(r2PutJson(env, ACCOUNTS_KEY, []));
     if (!se) writes.push(r2PutJson(env, SESSIONS_KEY, []));
+    if (!pl) writes.push(r2PutJson(env, PLANS_KEY, []));
+    if (!pr) writes.push(r2PutJson(env, PLAN_REQUESTS_KEY, []));
     if (writes.length) await Promise.all(writes);
     seeded = true;
   } catch {
@@ -553,13 +559,20 @@ async function authApiKey(env, request, settings) {
   if (rec.enabled === false) {
     return { ok: false, res: err('该 API Key 已被禁用', 401, 'key_disabled') };
   }
-  // 普通用户自助创建的密钥：账号被禁用 / 账号级配额用尽时一并失效。
+  // 普通用户自助创建的密钥：账号被禁用 / 套餐到期 / 账号级配额用尽时一并失效。
   // 账号数据走 5s 短缓存；控制台改账号会主动失效，生效延迟最多 5 秒。
+  let owner = null;
   if (rec.owner_id) {
     const accounts = await cachedJson(env, ACCOUNTS_KEY, [], ACCOUNTS_TTL_MS);
-    const owner = (accounts || []).find((a) => a.id === rec.owner_id);
+    owner = (accounts || []).find((a) => a.id === rec.owner_id);
     if (!owner || owner.enabled === false) {
       return { ok: false, res: err('该密钥所属账号已被禁用', 403, 'owner_disabled') };
+    }
+    if (owner.plan_expires_at && Date.now() > Date.parse(owner.plan_expires_at)) {
+      return {
+        ok: false,
+        res: err('该账号的套餐已到期，请联系管理员续费或更换套餐', 403, 'plan_expired'),
+      };
     }
     const accountQuota = Number(owner.quota_tokens) || 0;
     if (accountQuota > 0) {
@@ -583,7 +596,25 @@ async function authApiKey(env, request, settings) {
       res: err('该 Key 的 Token 配额已用完', 429, 'quota_exceeded'),
     };
   }
-  return { ok: true, admin: false, name: rec.name || 'key', record: rec };
+  return { ok: true, admin: false, name: rec.name || 'key', record: rec, owner };
+}
+
+/**
+ * 当前调用方可用的模型白名单：密钥白名单 ∩ 套餐白名单。
+ * 返回 null 表示不限；返回数组表示只允许数组内的模型。
+ */
+function authAllowedModels(auth) {
+  if (!auth || auth.admin || !auth.record) return null;
+  const keyAllow = Array.isArray(auth.record.allowed_models) ? auth.record.allowed_models : [];
+  const planAllow =
+    auth.owner && Array.isArray(auth.owner.plan_allowed_models)
+      ? auth.owner.plan_allowed_models
+      : [];
+  const keyLimited = keyAllow.length > 0 && !keyAllow.includes('*');
+  const planLimited = planAllow.length > 0 && !planAllow.includes('*');
+  if (!keyLimited && !planLimited) return null;
+  if (keyLimited && planLimited) return keyAllow.filter((m) => planAllow.includes(m));
+  return keyLimited ? keyAllow : planAllow;
 }
 
 /** 管理后台鉴权（/api/admin/*） */
@@ -647,6 +678,8 @@ const SESSION_TTL_MS = 7 * 86400000;
 const PBKDF2_ITERATIONS = 10000;
 const MAX_ACCOUNTS = 500;
 const MAX_KEYS_PER_USER = 20;
+const MAX_PLANS = 100;
+const MAX_PLAN_REQUESTS_KEPT = 500;
 const ACCOUNTS_TTL_MS = 5000;
 
 /** 账号不存在时也跑一次哈希，避免用响应耗时枚举用户名 */
@@ -738,7 +771,15 @@ const validAnswer = (a) => {
   return n.length >= 1 && n.length <= 100;
 };
 
+function planStatusOf(a) {
+  if (!a || !a.plan_id) return 'none';
+  if (a.plan_expires_at && Date.parse(a.plan_expires_at) <= Date.now()) return 'expired';
+  return 'active';
+}
+
 function publicAccount(a) {
+  const planStatus = planStatusOf(a);
+  const expires = a.plan_expires_at || '';
   return {
     id: a.id,
     username: a.username,
@@ -748,7 +789,140 @@ function publicAccount(a) {
     last_login_at: a.last_login_at || '',
     has_recovery: !!(a.security && a.security.hash),
     quota_tokens: a.quota_tokens || 0,
+    plan_id: a.plan_id || '',
+    plan_name: a.plan_name || '',
+    plan_price: a.plan_price || 0,
+    plan_rpm: a.plan_rpm || 0,
+    plan_allowed_models: Array.isArray(a.plan_allowed_models) ? a.plan_allowed_models : [],
+    plan_started_at: a.plan_started_at || '',
+    plan_expires_at: expires,
+    plan_status: planStatus,
+    plan_days_left:
+      planStatus === 'active' && expires
+        ? Math.max(0, Math.ceil((Date.parse(expires) - Date.now()) / 86400000))
+        : 0,
   };
+}
+
+/* ---- 套餐 ---- */
+
+function normalizePlanModels(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const m of list) {
+    const name = String(m == null ? '' : m).trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out.slice(0, 200);
+}
+
+function buildPlan(input, base) {
+  const now = nowIso();
+  return {
+    id: (base && base.id) || 'plan_' + Date.now().toString(36) + rand(4),
+    name: String((input && input.name) || '').trim().slice(0, 40),
+    description: String((input && input.description) || '').trim().slice(0, 300),
+    price: clampNum(input && input.price, 0, 1e9, 0),
+    quota_tokens: clampInt(input && input.quota_tokens, 0, 1e12, 0),
+    duration_days: clampInt(input && input.duration_days, 0, 3650, 30),
+    rpm: clampInt(input && input.rpm, 0, 100000, 0),
+    allowed_models: normalizePlanModels(input && input.allowed_models),
+    enabled: !(input && input.enabled === false),
+    created_at: (base && base.created_at) || now,
+    updated_at: now,
+  };
+}
+
+/** 套餐条款快照：申请、审批、账号字段都只认这份快照，之后改套餐不影响已生效的周期 */
+function planTerms(plan) {
+  return {
+    plan_id: plan.id,
+    plan_name: plan.name,
+    plan_price: Number(plan.price) || 0,
+    plan_rpm: Number(plan.rpm) || 0,
+    plan_allowed_models: normalizePlanModels(plan.allowed_models),
+    plan_duration_days: Number(plan.duration_days) || 0,
+  };
+}
+
+function requestAsPlan(r) {
+  return {
+    id: r.plan_id,
+    name: r.plan_name,
+    price: r.price,
+    quota_tokens: r.quota_tokens,
+    duration_days: r.duration_days,
+    rpm: r.rpm,
+    allowed_models: r.allowed_models || [],
+  };
+}
+
+/**
+ * 把套餐条款写到账号上。
+ * 同套餐续费时有效期从当前到期时间顺延（不吞掉剩余天数）；换套餐则从现在重新起算。
+ * 配额取套餐配额，账号名下密钥的用量由调用方清零，形成新的计费周期。
+ */
+function applyPlanToAccount(a, plan, at) {
+  const now = at || Date.now();
+  const terms = planTerms(plan);
+  const sameActive =
+    a.plan_id === terms.plan_id &&
+    !!a.plan_expires_at &&
+    Date.parse(a.plan_expires_at) > now;
+  const base = sameActive ? Date.parse(a.plan_expires_at) : now;
+  Object.assign(a, terms);
+  a.plan_started_at = new Date(now).toISOString();
+  a.plan_expires_at =
+    terms.plan_duration_days > 0
+      ? new Date(base + terms.plan_duration_days * 86400000).toISOString()
+      : '';
+  a.quota_tokens = Number(plan.quota_tokens) || 0;
+  a.updated_at = new Date(now).toISOString();
+}
+
+/** 清除套餐：保留当前配额，只解除套餐标识与到期时间（管理员显式操作） */
+function clearPlanFromAccount(a) {
+  delete a.plan_id;
+  delete a.plan_name;
+  delete a.plan_price;
+  delete a.plan_rpm;
+  delete a.plan_allowed_models;
+  delete a.plan_started_at;
+  delete a.plan_expires_at;
+  delete a.plan_duration_days;
+  delete a.last_plan_request_id;
+  a.updated_at = nowIso();
+}
+
+/** 清零账号名下所有密钥的用量（新计费周期开始）。返回是否有写入。 */
+async function resetOwnedKeyUsage(env, accountId) {
+  let changed = false;
+  await withLock(KEYS_KEY, async () => {
+    const keys = (await r2GetJson(env, KEYS_KEY, [])) || [];
+    for (const k of keys) {
+      if (k.owner_id !== accountId) continue;
+      if (k.used_tokens || k.requests || k.used_cost) {
+        k.used_tokens = 0;
+        k.requests = 0;
+        k.used_cost = 0;
+        changed = true;
+      }
+    }
+    if (changed) await r2PutJson(env, KEYS_KEY, keys);
+  });
+  if (changed) invalidateCache(KEYS_KEY);
+  return changed;
+}
+
+/** 只保留全部待审核申请 + 最近若干条已处理记录，避免文档无限增长 */
+function trimPlanRequests(list) {
+  if (list.length <= MAX_PLAN_REQUESTS_KEPT + 50) return list;
+  const pending = list.filter((r) => r.status === 'pending');
+  const decided = list
+    .filter((r) => r.status !== 'pending')
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .slice(0, MAX_PLAN_REQUESTS_KEPT);
+  return pending.concat(decided);
 }
 
 function enabledAdminCount(list) {
@@ -2247,16 +2421,11 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     );
   }
 
-  // 密钥级模型白名单
-  if (!auth.admin && auth.record) {
-    const allowed = auth.record.allowed_models;
-    if (
-      Array.isArray(allowed) &&
-      allowed.length &&
-      !allowed.includes('*') &&
-      !allowed.includes(body.model)
-    ) {
-      return err(`该密钥不允许调用模型 ${body.model}`, 403, 'model_forbidden');
+  // 密钥级 + 套餐级模型白名单（取交集）
+  if (!auth.admin) {
+    const allowed = authAllowedModels(auth);
+    if (allowed && !allowed.includes(body.model)) {
+      return err(`当前密钥或套餐不允许调用模型 ${body.model}`, 403, 'model_forbidden');
     }
   }
 
@@ -2790,22 +2959,9 @@ async function testChannel(env, ch, settings) {
 
 const rpmBuckets = new Map(); // key 标识 -> { winStart, count }
 
-/**
- * 密钥 RPM（每分钟请求数）检查：固定 60s 窗口计数。
- * - 密钥自己的 rpm 字段优先；未设置（null/undefined）时用 settings.rpm_default；0 = 不限。
- * - Workers 无跨实例共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置 × 实例数），
- *   用于「防单 Key 瞬时打爆上游」；计费级强配额请看 quota_tokens（走 R2 精确累加）。
- * - 计数在进入代理主流程时 +1（鉴权通过后才检查），被 429 的请求不计入下一窗口。
- */
-function checkRpm(auth, settings) {
-  if (!auth || auth.admin) return true; // ADMIN_KEY 直调不参与限流
-  const rec = auth.record;
-  if (!rec) return true;
-  const effRpm =
-    rec.rpm == null || rec.rpm === '' ? (settings && settings.rpm_default) | 0 : rec.rpm | 0;
-  if (effRpm <= 0) return true;
+/** 固定 60s 窗口计数：先自增再判断，保证被拒的请求也占用本窗口的名额 */
+function rpmHit(id, limit) {
   const now = Date.now();
-  const id = rec.key || rec.name || '?';
   let b = rpmBuckets.get(id);
   if (!b || now - b.winStart >= 60000) {
     b = { winStart: now, count: 0 };
@@ -2820,7 +2976,33 @@ function checkRpm(auth, settings) {
       .slice(0, Math.ceil(rpmBuckets.size / 2));
     for (const [sid] of stale) rpmBuckets.delete(sid);
   }
-  return b.count <= effRpm;
+  return b.count <= limit;
+}
+
+/**
+ * 密钥 RPM（每分钟请求数）检查：固定 60s 窗口计数。
+ * - 密钥自己的 rpm 字段优先；未设置（null/undefined）时用 settings.rpm_default；0 = 不限。
+ * - 套餐可再叠加一层「账号级 RPM」：该账号名下所有密钥合计不能超过套餐上限。
+ *   两层是「与」关系：各自独立计数，任意一层超限都拒绝。
+ * - Workers 无跨实例共享内存，这是 isolate 级软限制（多实例时实际上限 ≈ 配置 × 实例数），
+ *   用于「防单 Key 瞬时打爆上游」；计费级强配额请看 quota_tokens（走 R2 精确累加）。
+ */
+function checkRpm(auth, settings) {
+  if (!auth || auth.admin) return true; // ADMIN_KEY 直调不参与限流
+  const rec = auth.record;
+  if (!rec) return true;
+  const keyRpm =
+    rec.rpm == null || rec.rpm === '' ? (settings && settings.rpm_default) | 0 : rec.rpm | 0;
+  const planRpm = auth.owner ? Number(auth.owner.plan_rpm) || 0 : 0;
+  let ok = true;
+  // 两层都要计数：不能短路，否则超限的那层窗口会缺计数
+  if (keyRpm > 0) {
+    if (!rpmHit('key:' + (rec.id || rec.name || '?'), keyRpm)) ok = false;
+  }
+  if (planRpm > 0) {
+    if (!rpmHit('acct:' + auth.owner.id, planRpm)) ok = false;
+  }
+  return ok;
 }
 
 /* ---------------- Telegram 通知 ---------------- */
@@ -2885,21 +3067,25 @@ async function maybeAutoBackup(env, ctx, settings) {
     const today = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     if (today === lastBackupDate) return;
     lastBackupDate = today; // 先记日期再备份：备份失败明天重试，避免每个请求都重试
-    const [channels, keys, settingsSnap, accounts] = await Promise.all([
+    const [channels, keys, settingsSnap, accounts, plans, planRequests] = await Promise.all([
       r2GetJson(env, CHANNELS_KEY, []),
       r2GetJson(env, KEYS_KEY, []),
       r2GetJson(env, SETTINGS_KEY, {}),
       r2GetJson(env, ACCOUNTS_KEY, []),
+      r2GetJson(env, PLANS_KEY, []),
+      r2GetJson(env, PLAN_REQUESTS_KEY, []),
     ]);
     const snap = {
       type: 'oneapi-gateway-backup',
-      version: 2,
+      version: 3,
       created_at: nowIso(),
       channels,
       keys,
       settings: settingsSnap,
       // 账号快照含密码/密保答案的哈希（不可逆），用于灾备恢复登录能力
       accounts,
+      plans,
+      plan_requests: planRequests,
     };
     await r2PutJson(env, `backup/${today}.json`, snap);
     // 清理超期份数（YYYY-MM-DD 字典序即时间序）
@@ -3354,6 +3540,110 @@ async function handleUser(env, ctx, request) {
     return json({ ok: true });
   }
 
+  /* ---- 套餐：查看与申请（管理员审核后生效） ---- */
+  if (path === '/api/user/plans' && request.method === 'GET') {
+    const [plans, requests, keys] = await Promise.all([
+      r2GetJson(env, PLANS_KEY, []),
+      r2GetJson(env, PLAN_REQUESTS_KEY, []),
+      r2GetJson(env, KEYS_KEY, []),
+    ]);
+    const mine = (requests || [])
+      .filter((r) => r && r.account_id === account.id)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    const used = (keys || [])
+      .filter((k) => k.owner_id === account.id)
+      .reduce((sum, k) => sum + (Number(k.used_tokens) || 0), 0);
+    const cost = (keys || [])
+      .filter((k) => k.owner_id === account.id)
+      .reduce((sum, k) => sum + (Number(k.used_cost) || 0), 0);
+    return json({
+      account: {
+        ...publicAccount(account),
+        used_tokens: used,
+        used_cost: round8(cost),
+      },
+      plans: (plans || []).filter((p) => p && p.enabled !== false),
+      pending: mine.find((r) => r.status === 'pending') || null,
+      history: mine.filter((r) => r.status !== 'pending').slice(0, 10),
+    });
+  }
+
+  if (path === '/api/user/plans' && request.method === 'POST') {
+    const body = await readJsonBody(request);
+    if (!body) return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    const action = String(body.action || '');
+
+    if (action === 'request') {
+      if (!throttleHit('plan_req', account.id, 20, 3600000)) {
+        return err('申请过于频繁，请稍后再试', 429, 'too_many_attempts');
+      }
+      const planId = String(body.plan_id || '');
+      const plans = await r2GetJson(env, PLANS_KEY, []);
+      const plan = (plans || []).find((p) => p && p.id === planId && p.enabled !== false);
+      if (!plan) return err('套餐不存在或已下架', 404, 'plan_not_found');
+      let pendingExists = false;
+      let created = null;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        if (list.some((r) => r.account_id === account.id && r.status === 'pending')) {
+          pendingExists = true;
+          return;
+        }
+        created = {
+          id: 'pr_' + Date.now().toString(36) + rand(4),
+          account_id: account.id,
+          username: account.username,
+          plan_id: plan.id,
+          plan_name: plan.name,
+          price: plan.price,
+          quota_tokens: plan.quota_tokens,
+          duration_days: plan.duration_days,
+          rpm: plan.rpm,
+          allowed_models: normalizePlanModels(plan.allowed_models),
+          note: String(body.note || '').trim().slice(0, 200),
+          status: 'pending',
+          created_at: nowIso(),
+          reviewed_at: '',
+          reviewed_by: '',
+          reject_reason: '',
+        };
+        list.push(created);
+        await r2PutJson(env, PLAN_REQUESTS_KEY, trimPlanRequests(list));
+      });
+      if (pendingExists) {
+        return err('已有待审核的套餐申请，请等待管理员处理', 409, 'request_pending');
+      }
+      return json({ ok: true, request: created });
+    }
+
+    if (action === 'cancel') {
+      const id = String(body.id || '');
+      let notFound = false;
+      let badState = false;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        const rec = list.find((r) => r.id === id && r.account_id === account.id);
+        if (!rec) {
+          notFound = true;
+          return;
+        }
+        if (rec.status !== 'pending') {
+          badState = true;
+          return;
+        }
+        rec.status = 'cancelled';
+        rec.reviewed_at = nowIso();
+        rec.reviewed_by = account.username;
+        await r2PutJson(env, PLAN_REQUESTS_KEY, list);
+      });
+      if (notFound) return err('申请不存在', 404, 'not_found');
+      if (badState) return err('该申请已被处理，无法取消', 409, 'request_not_pending');
+      return json({ ok: true });
+    }
+
+    return err('不支持的操作', 400, 'bad_action');
+  }
+
   return err('未知用户接口', 404, 'not_found');
 }
 
@@ -3498,6 +3788,12 @@ async function handleAdmin(env, ctx, request) {
           return err('安全问题答案需为 1~100 字', 400, 'bad_answer');
         }
       }
+      let createPlan = null;
+      if (body.plan_id) {
+        const plans = (await r2GetJson(env, PLANS_KEY, [])) || [];
+        createPlan = plans.find((p) => p.id === String(body.plan_id));
+        if (!createPlan) return err('套餐不存在或已下架', 404, 'plan_not_found');
+      }
       const account = await buildAccount(
         {
           username,
@@ -3511,6 +3807,12 @@ async function handleAdmin(env, ctx, request) {
         },
         body.role === 'admin' ? 'admin' : 'user'
       );
+      if (createPlan) {
+        applyPlanToAccount(account, createPlan);
+        if (body.quota_tokens !== undefined) {
+          account.quota_tokens = clampInt(body.quota_tokens, 0, 1e12, 0);
+        }
+      }
       let taken = false;
       let full = false;
       await withLock(ACCOUNTS_KEY, async () => {
@@ -3556,6 +3858,20 @@ async function handleAdmin(env, ctx, request) {
       let conflictMsg = '';
       let disabled = false;
       let updated = null;
+      let resetUsage = false;
+      // 套餐指派在锁外解析（只读套餐列表），锁内只做赋值
+      let assignmentPlan;
+      let assignRequested = body.plan_id !== undefined;
+      if (assignRequested) {
+        const raw = body.plan_id == null ? '' : String(body.plan_id);
+        if (!raw) {
+          assignmentPlan = null;
+        } else {
+          const plans = (await r2GetJson(env, PLANS_KEY, [])) || [];
+          assignmentPlan = plans.find((p) => p.id === raw) || null;
+          if (!assignmentPlan) return err('套餐不存在或已下架', 404, 'plan_not_found');
+        }
+      }
       await withLock(ACCOUNTS_KEY, async () => {
         const list = await loadAccounts(env);
         const idx = list.findIndex((a) => a.id === id);
@@ -3587,6 +3903,15 @@ async function handleAdmin(env, ctx, request) {
         }
         a.role = nextRole;
         a.enabled = nextEnabled;
+        if (assignRequested) {
+          if (assignmentPlan === null) {
+            if (a.plan_id) clearPlanFromAccount(a);
+          } else if (a.plan_id !== assignmentPlan.id || body.renew_plan === true) {
+            applyPlanToAccount(a, assignmentPlan);
+            a.last_plan_request_id = '';
+            resetUsage = true;
+          }
+        }
         if (body.quota_tokens !== undefined) {
           a.quota_tokens = clampInt(body.quota_tokens, 0, 1e12, 0);
         }
@@ -3599,9 +3924,10 @@ async function handleAdmin(env, ctx, request) {
       });
       if (notFound) return err('账号不存在', 404, 'not_found');
       if (conflictMsg) return err(conflictMsg, 400, 'last_admin');
+      if (resetUsage) await resetOwnedKeyUsage(env, id);
       invalidateCache(ACCOUNTS_KEY);
       if (disabled) await revokeSessions(env, id);
-      return json({ ok: true, account: updated });
+      return json({ ok: true, account: updated, usage_reset: resetUsage });
     }
 
     if (action === 'reset-password') {
@@ -3666,8 +3992,198 @@ async function handleAdmin(env, ctx, request) {
         removedKeys = keys.length - keep.length;
         if (removedKeys) await r2PutJson(env, KEYS_KEY, keep);
       });
+      let removedRequests = 0;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        const keep = list.filter((r) => r.account_id !== id);
+        removedRequests = list.length - keep.length;
+        if (removedRequests) await r2PutJson(env, PLAN_REQUESTS_KEY, keep);
+      });
       invalidateCache(ACCOUNTS_KEY, KEYS_KEY);
-      return json({ ok: true, removed_keys: removedKeys });
+      return json({
+        ok: true,
+        removed_keys: removedKeys,
+        removed_requests: removedRequests,
+      });
+    }
+
+    return err('未知操作', 400, 'bad_action');
+  }
+
+  /* ---- 套餐管理（仅管理员） ---- */
+  if (path === '/api/admin/plans' && request.method === 'GET') {
+    const [plans, requests, accounts] = await Promise.all([
+      r2GetJson(env, PLANS_KEY, []),
+      r2GetJson(env, PLAN_REQUESTS_KEY, []),
+      loadAccounts(env),
+    ]);
+    const nameById = new Map(accounts.map((a) => [a.id, a.username]));
+    const list = (requests || [])
+      .map((r) => ({
+        ...r,
+        username: nameById.get(r.account_id) || r.username || '(已删除)',
+      }))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    return json({
+      plans: plans || [],
+      requests: list.slice(0, 200),
+      pending_count: list.filter((r) => r.status === 'pending').length,
+    });
+  }
+
+  if (path === '/api/admin/plans' && request.method === 'POST') {
+    const body = await readJsonBody(request);
+    if (!body) return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    const action = String(body.action || '');
+
+    if (action === 'create') {
+      if (!String(body.name || '').trim()) return err('请填写套餐名称', 400, 'bad_name');
+      const plan = buildPlan(body);
+      let full = false;
+      await withLock(PLANS_KEY, async () => {
+        const plans = (await r2GetJson(env, PLANS_KEY, [])) || [];
+        if (plans.length >= MAX_PLANS) {
+          full = true;
+          return;
+        }
+        plans.push(plan);
+        await r2PutJson(env, PLANS_KEY, plans);
+      });
+      if (full) return err(`套餐数量最多 ${MAX_PLANS} 个`, 400, 'plan_limit');
+      return json({ ok: true, plan });
+    }
+
+    if (action === 'update') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少套餐 id', 400, 'bad_id');
+      if (body.name !== undefined && !String(body.name).trim()) {
+        return err('套餐名称不能为空', 400, 'bad_name');
+      }
+      let notFound = false;
+      let plan = null;
+      await withLock(PLANS_KEY, async () => {
+        const plans = (await r2GetJson(env, PLANS_KEY, [])) || [];
+        const idx = plans.findIndex((p) => p.id === id);
+        if (idx < 0) {
+          notFound = true;
+          return;
+        }
+        plan = buildPlan({ ...plans[idx], ...body, id }, plans[idx]);
+        plans[idx] = plan;
+        await r2PutJson(env, PLANS_KEY, plans);
+      });
+      if (notFound) return err('套餐不存在', 404, 'not_found');
+      return json({ ok: true, plan });
+    }
+
+    if (action === 'delete') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少套餐 id', 400, 'bad_id');
+      let notFound = false;
+      await withLock(PLANS_KEY, async () => {
+        const plans = (await r2GetJson(env, PLANS_KEY, [])) || [];
+        const keep = plans.filter((p) => p.id !== id);
+        if (keep.length === plans.length) {
+          notFound = true;
+          return;
+        }
+        await r2PutJson(env, PLANS_KEY, keep);
+      });
+      if (notFound) return err('套餐不存在', 404, 'not_found');
+      // 已提交的待审核申请自动驳回；已生效的账号保留条款快照，到期后自然失效
+      let rejected = 0;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        for (const r of list) {
+          if (r.plan_id === id && r.status === 'pending') {
+            r.status = 'rejected';
+            r.reject_reason = '套餐已下架';
+            r.reviewed_at = nowIso();
+            r.reviewed_by = gate.user.username;
+            rejected++;
+          }
+        }
+        if (rejected) await r2PutJson(env, PLAN_REQUESTS_KEY, list);
+      });
+      return json({ ok: true, rejected_requests: rejected });
+    }
+
+    if (action === 'approve-request') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少申请 id', 400, 'bad_id');
+      let notFound = false;
+      let badState = false;
+      let accountMissing = false;
+      let request = null;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        const rec = list.find((r) => r.id === id);
+        if (!rec) {
+          notFound = true;
+          return;
+        }
+        if (rec.status !== 'pending') {
+          badState = true;
+          return;
+        }
+        let applied = false;
+        await withLock(ACCOUNTS_KEY, async () => {
+          const accounts = await loadAccounts(env);
+          const a = accounts.find((x) => x.id === rec.account_id);
+          if (!a) {
+            accountMissing = true;
+            return;
+          }
+          if (a.last_plan_request_id !== rec.id) {
+            applyPlanToAccount(a, requestAsPlan(rec));
+            a.last_plan_request_id = rec.id;
+            await resetOwnedKeyUsage(env, a.id);
+            await r2PutJson(env, ACCOUNTS_KEY, accounts);
+          }
+          applied = true;
+        });
+        if (!applied) return;
+        rec.status = 'approved';
+        rec.reviewed_at = nowIso();
+        rec.reviewed_by = gate.user.username;
+        rec.reject_reason = '';
+        await r2PutJson(env, PLAN_REQUESTS_KEY, list);
+        request = rec;
+      });
+      if (notFound) return err('申请不存在', 404, 'not_found');
+      if (badState) return err('该申请已被处理', 409, 'request_not_pending');
+      if (accountMissing) return err('申请对应的账号已不存在', 404, 'account_missing');
+      invalidateCache(ACCOUNTS_KEY, KEYS_KEY);
+      return json({ ok: true, request });
+    }
+
+    if (action === 'reject-request') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少申请 id', 400, 'bad_id');
+      let notFound = false;
+      let badState = false;
+      let request = null;
+      await withLock(PLAN_REQUESTS_KEY, async () => {
+        const list = (await r2GetJson(env, PLAN_REQUESTS_KEY, [])) || [];
+        const rec = list.find((r) => r.id === id);
+        if (!rec) {
+          notFound = true;
+          return;
+        }
+        if (rec.status !== 'pending') {
+          badState = true;
+          return;
+        }
+        rec.status = 'rejected';
+        rec.reject_reason = String(body.reason || '').trim().slice(0, 200);
+        rec.reviewed_at = nowIso();
+        rec.reviewed_by = gate.user.username;
+        await r2PutJson(env, PLAN_REQUESTS_KEY, list);
+        request = rec;
+      });
+      if (notFound) return err('申请不存在', 404, 'not_found');
+      if (badState) return err('该申请已被处理', 409, 'request_not_pending');
+      return json({ ok: true, request });
     }
 
     return err('未知操作', 400, 'bad_action');
@@ -3756,20 +4272,24 @@ async function handleAdmin(env, ctx, request) {
   /* ---- 备份与恢复 ---- */
   // 当场生成完整快照下载（channels + keys + settings，含时间戳）
   if (path === '/api/admin/backup' && request.method === 'GET') {
-    const [ch, ks, st, ac] = await Promise.all([
+    const [ch, ks, st, ac, pl, pr] = await Promise.all([
       r2GetJson(env, CHANNELS_KEY, []),
       r2GetJson(env, KEYS_KEY, []),
       r2GetJson(env, SETTINGS_KEY, {}),
       r2GetJson(env, ACCOUNTS_KEY, []),
+      r2GetJson(env, PLANS_KEY, []),
+      r2GetJson(env, PLAN_REQUESTS_KEY, []),
     ]);
     const snap = {
       type: 'oneapi-gateway-backup',
-      version: 2,
+      version: 3,
       created_at: nowIso(),
       channels: ch,
       keys: ks,
       settings: st,
       accounts: ac,
+      plans: pl,
+      plan_requests: pr,
     };
     return new Response(JSON.stringify(snap, null, 2), {
       headers: {
@@ -3845,6 +4365,32 @@ async function handleAdmin(env, ctx, request) {
       }
       restoreAccounts = true;
     }
+    // v3 备份带套餐与申请记录：可选恢复；只恢复账号而备份里没有申请记录时，
+    // 清空当前申请，避免待审核记录指向已经不存在（或换了身份）的账号。
+    let restorePlans = false;
+    if (body.plans !== undefined) {
+      if (!Array.isArray(body.plans)) {
+        return err('备份中的 plans 应为数组', 400, 'invalid_backup');
+      }
+      const bad = body.plans.find((p) => !p || typeof p.id !== 'string' || typeof p.name !== 'string');
+      if (bad) return err('备份中的套餐数据不完整，已拒绝恢复', 400, 'invalid_backup');
+      restorePlans = true;
+    }
+    let restoreRequests = false;
+    if (body.plan_requests !== undefined) {
+      if (!Array.isArray(body.plan_requests)) {
+        return err('备份中的 plan_requests 应为数组', 400, 'invalid_backup');
+      }
+      const bad = body.plan_requests.find(
+        (r) =>
+          !r ||
+          typeof r.id !== 'string' ||
+          typeof r.account_id !== 'string' ||
+          typeof r.status !== 'string'
+      );
+      if (bad) return err('备份中的套餐申请数据不完整，已拒绝恢复', 400, 'invalid_backup');
+      restoreRequests = true;
+    }
     const nextSettings = normalizeSettings(body.settings || {});
     await Promise.all([
       withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels)),
@@ -3856,6 +4402,16 @@ async function handleAdmin(env, ctx, request) {
       restoreAccounts
         ? withLock(ACCOUNTS_KEY, () => r2PutJson(env, ACCOUNTS_KEY, body.accounts))
         : Promise.resolve(),
+      restorePlans
+        ? withLock(PLANS_KEY, () => r2PutJson(env, PLANS_KEY, body.plans))
+        : Promise.resolve(),
+      restoreRequests
+        ? withLock(PLAN_REQUESTS_KEY, () =>
+            r2PutJson(env, PLAN_REQUESTS_KEY, body.plan_requests)
+          )
+        : restoreAccounts
+          ? withLock(PLAN_REQUESTS_KEY, () => r2PutJson(env, PLAN_REQUESTS_KEY, []))
+          : Promise.resolve(),
     ]);
     if (restoreAccounts) {
       await withLock(SESSIONS_KEY, () => r2PutJson(env, SESSIONS_KEY, []));
@@ -3868,6 +4424,8 @@ async function handleAdmin(env, ctx, request) {
       channels: body.channels.length,
       keys: body.keys.length,
       accounts: restoreAccounts ? body.accounts.length : undefined,
+      plans: restorePlans ? body.plans.length : undefined,
+      plan_requests: restoreRequests ? body.plan_requests.length : undefined,
       restored_at: nowIso(),
     });
   }
@@ -4141,11 +4699,8 @@ export default {
         ),
       ];
       models = [...new Set([...models, ...(settings.custom_models || [])])];
-      if (!auth.admin && auth.record && Array.isArray(auth.record.allowed_models) &&
-          auth.record.allowed_models.length && !auth.record.allowed_models.includes('*')) {
-        const allow = auth.record.allowed_models;
-        models = models.filter((m) => allow.includes(m));
-      }
+      const allowed = authAllowedModels(auth);
+      if (allowed) models = models.filter((m) => allowed.includes(m));
       return json({
         object: 'list',
         data: models.sort().map((id) => ({

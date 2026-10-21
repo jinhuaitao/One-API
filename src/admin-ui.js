@@ -397,7 +397,18 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .content{padding:16px var(--gutter) 44px}
     .topbar-in{padding:0 var(--gutter)}
     .topbar p{display:none}
+    .plans{grid-template-columns:1fr}
   }
+  .plans{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:var(--sp-4);margin-top:12px}
+  .plan{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--panel2)}
+  .plan.on{border-color:var(--accent-line);background:var(--accent-soft)}
+  .plan-h{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+  .plan-h b{font-size:15px;letter-spacing:.1px}
+  .plan-price{font-size:23px;font-weight:700;letter-spacing:-.4px;line-height:1.1;font-variant-numeric:tabular-nums}
+  .plan-price small{font-size:12px;color:var(--muted);font-weight:400;letter-spacing:0}
+  .plan-desc{color:var(--text2);font-size:12.5px;line-height:1.6;min-height:20px}
+  .plan-meta{display:flex;flex-wrap:wrap;gap:6px}
+  .plan-foot{margin-top:auto;display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
 </style>
 </head>
 <body>
@@ -427,8 +438,10 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <button class="navbtn" data-tab="keys" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.6"/><path d="M10.1 12.9 20.5 2.5"/><path d="M17 6l2 2M19.5 3.5l2 2"/></svg>密钥管理<span class="badge-n" id="navKey">0</span></button>
       <div class="navsec" data-user>我的</div>
       <button class="navbtn" data-tab="mykeys" data-user><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.6"/><path d="M10.1 12.9 20.5 2.5"/><path d="M17 6l2 2M19.5 3.5l2 2"/></svg>我的密钥<span class="badge-n" id="navMyKey">0</span></button>
+      <button class="navbtn" data-tab="plans" data-user><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5z"/><path d="m3 8.5 9 5.5 9-5.5M12 14v7"/></svg>套餐</button>
       <button class="navbtn" data-tab="account" data-user><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>我的账号</button>
       <div class="navsec" data-admin>系统</div>
+      <button class="navbtn" data-tab="plans" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5z"/><path d="m3 8.5 9 5.5 9-5.5M12 14v7"/></svg>套餐管理<span class="badge-n" id="navPlan">0</span></button>
       <button class="navbtn" data-tab="accounts" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 21a6.5 6.5 0 0 1 13 0"/><path d="M16 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.6a6.5 6.5 0 0 1 3.5 6.4"/></svg>账号管理<span class="badge-n" id="navAcct">0</span></button>
       <button class="navbtn" data-tab="settings" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.1"/><circle cx="15" cy="12" r="2.1"/><circle cx="8" cy="17" r="2.1"/></svg>网关设置</button>
       <button class="navbtn" data-tab="help" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>使用说明</button>
@@ -535,6 +548,44 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <div class="card">
           <div class="card-head"><div><h3>我的密钥</h3><p class="desc">密钥仅在创建时完整显示一次；遗失请重新生成</p></div></div>
           <div id="myKeyTable"></div>
+        </div>
+      </section>
+
+      <section id="t-plans" class="tab">
+        <div class="card" data-user>
+          <div class="card-head">
+            <div><h3>我的套餐</h3><p class="desc">套餐需管理员审核后生效；到期后名下密钥将无法调用，续费或更换套餐后恢复</p></div>
+            <span id="planStatusChip"></span>
+          </div>
+          <div id="userPlanBox"><div class="empty">加载中…</div></div>
+          <div class="login-warn" id="planPendingBanner" style="display:none"></div>
+        </div>
+        <div class="card" data-user>
+          <div class="card-head"><div><h3>可选套餐</h3><p class="desc">提交申请后请联系管理员确认付款，审核通过即生效</p></div></div>
+          <div id="planCards" class="plans"></div>
+        </div>
+        <div class="card" data-user>
+          <div class="card-head"><div><h3>申请记录</h3><p class="desc">最近 10 条</p></div></div>
+          <div id="planHistory"></div>
+        </div>
+
+        <div class="card" data-admin>
+          <div class="card-head">
+            <div><h3>套餐管理</h3><p class="desc">定义 Token 配额、有效期、RPM 与可用模型；用户申请经审核后生效</p></div>
+            <button class="sm" data-act="add-plan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建套餐</button>
+          </div>
+          <div id="planTable"></div>
+        </div>
+        <div class="card" data-admin>
+          <div class="card-head">
+            <div><h3>待审核申请</h3><p class="desc">确认收款后点「通过」：套餐立即生效，并以套餐配额重新计算周期（名下密钥用量清零）</p></div>
+            <span class="badge warn" id="planPendingBadge">0 待审核</span>
+          </div>
+          <div id="planReqTable"></div>
+        </div>
+        <div class="card" data-admin>
+          <div class="card-head"><div><h3>全部申请记录</h3><p class="desc">最近 200 条</p></div></div>
+          <div id="planReqHistory"></div>
         </div>
       </section>
 
@@ -648,7 +699,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           </div>
           <div class="grid">
             <label>默认 RPM（每密钥每分钟请求数，0 = 不限）<input type="number" id="s_rpm_default" min="0" max="100000" step="1"><span class="hint">未单独设置 RPM 的密钥沿用此值。Workers 多实例下为软限制（实际上限 ≈ 配置 × 实例数），用于防单 Key 打爆上游；计费级强配额请用密钥的 Token 配额。</span></label>
-            <label>每日自动备份保留份数<input type="number" id="s_backup_keep" min="0" max="365" step="1"><span class="hint">每天首个请求把渠道 / 密钥 / 设置快照到 backup/<日期>.json，超期自动清理。0 = 关闭自动备份。</span></label>
+            <label>每日自动备份保留份数<input type="number" id="s_backup_keep" min="0" max="365" step="1"><span class="hint">每天首个请求把渠道 / 密钥 / 设置 / 账号 / 套餐与申请记录快照到 backup/<日期>.json，超期自动清理。0 = 关闭自动备份。</span></label>
             <label>定时巡检间隔（分钟）<input type="number" id="s_patrol_min" min="0" max="1440" step="5"><span class="hint">Cron 每 10 分钟唤起，巡检按此间隔执行：对每个启用渠道的每个 Key 发一次真实小请求（耗少量上游额度），状态翻转时发 Telegram 通知；过期日志清理（每天一次）与备份兜底不受此项影响。0 = 关闭定时巡检，默认 30。</span></label>
           </div>
           <div class="grid" style="margin-top:12px">
@@ -666,7 +717,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
         <div class="card">
           <div class="card-head">
-            <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置 / 账号的完整快照；恢复会整体覆盖当前配置与账号</p></div>
+            <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置 / 账号 / 套餐与申请记录的完整快照；恢复会整体覆盖当前配置、账号与套餐</p></div>
             <div style="display:flex;gap:8px">
               <button class="soft sm" data-act="backup-export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>立即导出</button>
               <button class="ghost sm" data-act="backup-restore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>从文件恢复</button>
@@ -729,14 +780,23 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <li>「问答找回密码」需用户在「我的账号」中设置安全问题；管理员可在设置中关闭该功能，改用「账号管理 → 重置密码」。</li>
             <li>部署时配置的 <code>ADMIN_KEY</code> 保留为应急凭据：可在登录页以「应急 ADMIN_KEY」进入，不影响日常账号登录。</li>
           </ul>
+          <h4>套餐与计费</h4>
+          <ul>
+            <li><b>套餐内容</b>：名称、价格、Token 配额、有效期（天，0 = 长期有效）、账号级 RPM、可用模型白名单。管理员在「套餐管理」创建与上下架。</li>
+            <li><b>申请与审核</b>：普通用户在「套餐」页提交申请，管理员确认收款后点「通过」即生效，并开启新的计费周期（名下密钥用量清零）；同一账号同时只能有一条待审核申请。</li>
+            <li><b>条款快照</b>：申请提交与审核生效时都按当时的套餐条款执行，之后修改套餐不影响已提交的申请和已生效周期；同套餐续费的有效期从原到期时间顺延，换套餐则从审核通过时重新起算。</li>
+            <li><b>生效限制</b>：套餐配额按账号名下所有密钥合计；到期后该账号名下密钥立即停止调用（403 <code>plan_expired</code>）；套餐模型白名单与密钥白名单取交集；账号级 RPM 与密钥 RPM 各自独立计数，任意一层超限即拒绝。</li>
+            <li><b>下架</b>：删除套餐会自动驳回其待审核申请；已生效账号保留当前条款直至到期，不再续期。</li>
+          </ul>
           <h4>数据存储</h4>
-          <p>全部数据存放于 Cloudflare R2：<code>data/channels.json</code>（渠道）、<code>data/keys.json</code>（密钥）、<code>data/settings.json</code>（设置）、<code>data/accounts.json</code>（账号，密码与密保答案仅存 PBKDF2 哈希）、<code>data/sessions.json</code>（登录会话，仅存 token 哈希）、<code>data/stats/&lt;日期&gt;.json</code>（按天统计）、<code>logs/&lt;日期&gt;/</code>（请求日志）。可在「备份与恢复」导出完整快照。</p>
+          <p>全部数据存放于 Cloudflare R2：<code>data/channels.json</code>（渠道）、<code>data/keys.json</code>（密钥）、<code>data/settings.json</code>（设置）、<code>data/accounts.json</code>（账号，密码与密保答案仅存 PBKDF2 哈希）、<code>data/sessions.json</code>（登录会话，仅存 token 哈希）、<code>data/plans.json</code>（套餐）、<code>data/plan-requests.json</code>（套餐申请与审核记录）、<code>data/stats/&lt;日期&gt;.json</code>（按天统计）、<code>logs/&lt;日期&gt;/</code>（请求日志）。可在「备份与恢复」导出完整快照。</p>
           <h4>接口一览</h4>
           <ul>
             <li><code>GET /v1/models</code>、<code>POST /v1/chat/completions</code>、<code>POST /v1/completions</code>、<code>POST /v1/embeddings</code></li>
             <li><code>GET /healthz</code> 健康检查；<code>GET /</code> 网关状态</li>
             <li>管理接口均在 <code>/api/admin/*</code>，需登录会话 <code>X-Session-Token</code>，或应急 <code>X-Admin-Key</code></li>
-            <li>账号接口 <code>/api/auth/*</code>（初始化、登录、注册、找回密码），用户密钥接口 <code>/api/user/*</code></li>
+            <li>账号接口 <code>/api/auth/*</code>（初始化、登录、注册、找回密码），用户密钥接口 <code>/api/user/keys</code></li>
+            <li>套餐接口：<code>GET /api/user/plans</code> 查看可选套餐与申请记录，<code>POST /api/user/plans</code> 申请 / 取消；<code>GET /api/admin/plans</code> 查看套餐与待审申请，<code>POST /api/admin/plans</code> 完成套餐 CRUD 与审核</li>
           </ul>
         </div>
       </section>
@@ -755,12 +815,13 @@ var ME = null;
 var AUTH = { initialized: true, allow_registration: false, allow_password_recovery: true, admin_key_configured: false };
 var authMode = 'login';
 var RECOVERY = { username: '', question: '' };
-var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [] };
-var editingCh = -1, editingKey = -1, editingAccount = -1;
+var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [], plans: [], planRequests: [], planPending: 0, userPlans: null };
+var editingCh = -1, editingKey = -1, editingAccount = -1, editingPlan = '';
 var RANGE = 14, METRIC = 'requests';
 var autoTimer = null;
-var ADMIN_TABS = ['overview','logs','channels','keys','accounts','settings','help'];
-var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], mykeys:['我的密钥','管理自己的网关密钥与用量'], accounts:['账号管理','管理员与普通用户账号'], account:['我的账号','密码与安全问题'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试、定价与日志策略'], help:['使用说明','接入方式与功能说明'] };
+var ADMIN_TABS = ['overview','logs','channels','keys','plans','accounts','settings','help'];
+var USER_TABS = ['mykeys','plans','account'];
+var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], mykeys:['我的密钥','管理自己的网关密钥与用量'], plans:['套餐','套餐选择、申请与审核'], accounts:['账号管理','管理员与普通用户账号'], account:['我的账号','密码与安全问题'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试、定价与日志策略'], help:['使用说明','接入方式与功能说明'] };
 
 var I = {
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>',
@@ -1178,7 +1239,7 @@ function bootAuth(msg){
 }
 
 function resetState(){
-  S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [] };
+  S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [], plans: [], planRequests: [], planPending: 0, userPlans: null };
   if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
 }
 function doLogout(){
@@ -1204,11 +1265,21 @@ function doLogout(){
 function loadAll(){
   if(!ME) return Promise.resolve([]);
   if(ME.role !== 'admin'){
-    return api('/api/user/keys').then(function(r){
-      S.my = r.account || null;
-      S.mykeys = r.keys || [];
-      renderAll();
-      return [];
+    var failed = [];
+    return Promise.all([
+      api('/api/user/keys').then(function(r){
+        S.my = r.account || null;
+        S.mykeys = r.keys || [];
+      }).catch(function(e){ failed.push(e); }),
+      api('/api/user/plans').then(function(r){
+        S.userPlans = r || null;
+        if(r && r.account) S.my = r.account;
+      }).catch(function(e){ failed.push(e); })
+    ]).then(function(){
+      var authFail = failed.filter(isSessionErr)[0];
+      if(authFail) throw authFail;
+      try { renderAll(); } catch(re){ if(window.console) console.error('[render]', re); }
+      return failed;
     });
   }
   var jobs = [
@@ -1218,6 +1289,11 @@ function loadAll(){
     api('/api/admin/settings').then(function(v){ S.settings = v || {}; }),
     api('/api/admin/stats?days=' + RANGE).then(function(v){ S.stats = v || null; }),
     api('/api/admin/accounts').then(function(v){ S.accounts = (v && v.accounts) || []; }),
+    api('/api/admin/plans').then(function(v){
+      S.plans = (v && v.plans) || [];
+      S.planRequests = (v && v.requests) || [];
+      S.planPending = (v && v.pending_count) || 0;
+    }),
     api('/api/admin/logs/dates').then(function(v){
       // 用服务端（按设置里的时区偏移）算出的「今天」作为默认查询日期，
       // 避免浏览器时区与 Worker 的 UTC 时区不一致导致查不到刚产生的日志
@@ -1252,7 +1328,7 @@ function applyRole(){
   if($('meName')) $('meName').textContent = ME ? ME.username : '—';
   if($('meRole')) $('meRole').textContent = ME ? ((admin ? '管理员' : '普通用户') + (ME.emergency ? ' · 应急' : '')) : '未登录';
   var tab = currentTab();
-  var allowed = admin ? ADMIN_TABS.concat(['account']) : ['mykeys', 'account'];
+  var allowed = admin ? ADMIN_TABS.concat(['account']) : USER_TABS;
   if(allowed.indexOf(tab) < 0) gotoTab(admin ? 'overview' : 'mykeys');
 }
 
@@ -1308,7 +1384,7 @@ function refresh(){
 function gotoTab(t){
   if(!ME) return;
   var admin = ME.role === 'admin';
-  if(!admin && ADMIN_TABS.indexOf(t) >= 0) t = 'mykeys';
+  if(!admin && USER_TABS.indexOf(t) < 0) t = 'mykeys';
   if(admin && t === 'mykeys') t = 'overview';
   document.querySelectorAll('.navbtn').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-tab') === t); });
   document.querySelectorAll('.tab').forEach(function(s){ s.classList.remove('on'); });
@@ -1320,6 +1396,7 @@ function gotoTab(t){
   if(t === 'logs'){ if(!$('logDate').value) $('logDate').value = S.serverToday || todayLocal(); loadLogs(true); }
   if(t === 'settings') renderSettings();
   if(t === 'mykeys') renderMyKeys();
+  if(t === 'plans') renderPlans();
   if(t === 'accounts') renderAccounts();
   if(t === 'account') renderAccount();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1914,11 +1991,14 @@ function renderMyKeys(){
   var pct = quota > 0 ? Math.min(100, Math.round(used / quota * 100)) : 0;
   if($('myStats')){
     $('myStats').innerHTML =
-      statCard({ icon:I.coin, label:'账号配额', value:quota > 0 ? fmtShort(quota) : '不限', sub:quota > 0 ? '已用 ' + pct + '%' : '管理员未设置账号配额' }) +
+      statCard({ icon:I.coin, label:'账号配额', value:quota > 0 ? fmtShort(quota) : '不限', sub:(a.plan_id ? esc(a.plan_name) + ' · ' : '') + (quota > 0 ? '已用 ' + pct + '%' : '未设置账号配额') }) +
       statCard({ icon:I.bolt, label:'已用 Tokens', value:fmtShort(used), sub:'预估费用 $' + fmtCost(cost) }) +
       statCard({ icon:I.server, label:'我的密钥', value:String((S.mykeys || []).length), sub:'累计 ' + fmtNum(requests) + ' 次请求 · 上限 20 个' });
   }
   $('navMyKey').textContent = (S.mykeys || []).length;
+  var warn = a.plan_status === 'expired'
+    ? '<div class="login-warn" style="margin-bottom:12px">套餐已到期，名下密钥的调用会被拒绝。 <a class="link" data-goto="plans">去续费</a></div>'
+    : '';
   var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:160px">名称</th><th style="min-width:150px">密钥前缀</th><th class="ar" style="width:150px">已用 Tokens</th><th style="width:108px">创建时间</th><th class="ar" style="width:186px">操作</th></tr></thead><tbody>';
   if(!(S.mykeys || []).length){
     h += '<tr><td colspan="6"><div class="empty">' + I.inbox + '<div>还没有密钥，点击右上角「生成密钥」创建</div></div></td></tr>';
@@ -1937,7 +2017,7 @@ function renderMyKeys(){
       '<button class="ghost sm" data-act="rename-my" data-i="' + i + '">重命名</button>' +
       '<button class="soft sm" data-act="del-my-key" data-i="' + i + '">删除</button></div></td></tr>';
   });
-  box.innerHTML = h + '</tbody></table>';
+  box.innerHTML = warn + h + '</tbody></table>';
 }
 function openMyKeyModal(){
   openModal('<h3>生成密钥</h3><p class="msub">密钥仅在创建当次完整显示，请立即复制保存</p>' +
@@ -1983,6 +2063,290 @@ function delMyKey(i){
   });
 }
 
+/* ---------- 套餐 ---------- */
+function fmtPrice(v){ v = Number(v) || 0; return v > 0 ? '¥' + v.toFixed(2) : '免费'; }
+function fmtPlanQuota(q){ return Number(q) > 0 ? fmtShort(q) + ' Tokens' : '不限 Tokens'; }
+function fmtPlanDays(d){ d = Number(d) || 0; return d > 0 ? d + ' 天' : '长期有效'; }
+function fmtPlanRpm(r){ r = Number(r) || 0; return r > 0 ? fmtNum(r) + ' 次/分钟' : '不限 RPM'; }
+function planModelsText(models){ return (models && models.length) ? models.join('、') : '全部模型'; }
+function planById(id){
+  var lists = [S.plans || []];
+  if(S.userPlans && Array.isArray(S.userPlans.plans)) lists.push(S.userPlans.plans);
+  for(var i = 0; i < lists.length; i++){
+    var hit = lists[i].filter(function(p){ return p.id === id; })[0];
+    if(hit) return hit;
+  }
+  return null;
+}
+function planReqStatus(s){
+  if(s === 'approved') return '<span class="badge ok">已通过</span>';
+  if(s === 'rejected') return '<span class="badge bad">已驳回</span>';
+  if(s === 'cancelled') return '<span class="badge">已取消</span>';
+  return '<span class="badge warn">待审核</span>';
+}
+function planAccountChip(a){
+  if(!a || !a.plan_id) return '<span class="badge">未开通</span>';
+  if(a.plan_status === 'expired') return '<span class="badge bad">已到期</span>';
+  return '<span class="badge ok">生效中</span>';
+}
+function renderPlans(){
+  if(!ME) return;
+  if(ME.role === 'admin') renderAdminPlans();
+  else renderUserPlans();
+}
+
+function renderUserPlans(){
+  var d = S.userPlans || {};
+  var a = d.account || S.my || ME || {};
+  var plans = d.plans || [];
+  var pending = d.pending || null;
+  var chip = $('planStatusChip');
+  if(chip) chip.innerHTML = planAccountChip(a);
+
+  var box = $('userPlanBox');
+  if(box){
+    var used = Number(a.used_tokens) || 0;
+    var quota = Number(a.quota_tokens) || 0;
+    var rows = [
+      ['套餐', a.plan_name ? esc(a.plan_name) : '<span class="muted">尚未开通</span>'],
+      ['状态', planAccountChip(a)],
+      ['到期时间', a.plan_expires_at ? esc(String(a.plan_expires_at).slice(0,10)) + (a.plan_days_left > 0 ? '（剩余 ' + a.plan_days_left + ' 天）' : '') : (a.plan_id ? '长期有效' : '-')],
+      ['Token 配额', fmtPlanQuota(quota) + (quota > 0 ? '<span class="sub muted">已用 ' + fmtNum(used) + ' · ' + Math.min(100, Math.round(used / quota * 100)) + '%</span>' : '')],
+      ['RPM', a.plan_id ? fmtPlanRpm(a.plan_rpm) : '<span class="muted">按密钥 / 全局设置</span>'],
+      ['可用模型', a.plan_id ? esc(planModelsText(a.plan_allowed_models)) : '<span class="muted">不限</span>']
+    ];
+    box.innerHTML = rows.map(function(r){ return '<div class="kv"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('');
+    if(a.plan_status === 'expired'){
+      box.innerHTML += '<div class="login-warn">套餐已于 ' + esc(String(a.plan_expires_at).slice(0,10)) + ' 到期，名下密钥的调用会被拒绝。请选择套餐申请续费，审核通过后自动恢复。</div>';
+    }
+  }
+
+  var banner = $('planPendingBanner');
+  if(banner){
+    if(pending){
+      banner.style.display = '';
+      banner.innerHTML = '套餐「' + esc(pending.plan_name) + '」的申请正在等待管理员审核（提交于 ' + esc(fmtTime(pending.created_at)) + '）' +
+        ' <button class="ghost sm" data-act="cancel-plan-req" data-id="' + esc(pending.id) + '">取消申请</button>';
+    } else {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+    }
+  }
+
+  var cards = $('planCards');
+  if(cards){
+    if(!plans.length){
+      cards.innerHTML = '<div class="empty">' + I.inbox + '<div>管理员还没有配置可申请的套餐</div></div>';
+    } else {
+      cards.innerHTML = plans.map(function(p){
+        var isCurrent = a.plan_id === p.id && a.plan_status !== 'expired';
+        var btn = pending
+          ? '<button class="ghost" disabled>审核中</button>'
+          : '<button class="' + (isCurrent ? 'ghost' : '') + '" data-act="request-plan" data-id="' + esc(p.id) + '">' + (isCurrent ? '续费' : '申请开通') + '</button>';
+        return '<div class="plan' + (isCurrent ? ' on' : '') + '">' +
+          '<div class="plan-h"><b>' + esc(p.name) + '</b>' + (isCurrent ? '<span class="badge ok">当前套餐</span>' : '') + '</div>' +
+          '<div class="plan-price">' + fmtPrice(p.price) + ' <small>' + fmtPlanDays(p.duration_days) + '</small></div>' +
+          '<div class="plan-desc">' + (p.description ? esc(p.description) : '&nbsp;') + '</div>' +
+          '<div class="plan-meta"><span class="chip">' + fmtPlanQuota(p.quota_tokens) + '</span><span class="chip">' + fmtPlanDays(p.duration_days) + '</span><span class="chip">' + fmtPlanRpm(p.rpm) + '</span></div>' +
+          '<div class="hint" style="font-size:12px">可用模型：' + esc(planModelsText(p.allowed_models)) + '</div>' +
+          '<div class="plan-foot">' + btn + '</div>' +
+          '</div>';
+      }).join('');
+    }
+  }
+
+  var hist = $('planHistory');
+  if(hist){
+    var list = d.history || [];
+    var h = '<table><thead><tr><th style="width:132px">提交时间</th><th>套餐</th><th style="width:90px">金额</th><th style="width:96px">状态</th><th>审核信息</th></tr></thead><tbody>';
+    if(!list.length){
+      h += '<tr><td colspan="5"><div class="empty">' + I.inbox + '<div>还没有已处理的申请记录</div></div></td></tr>';
+    }
+    list.forEach(function(r){
+      var info = '-';
+      if(r.status === 'rejected') info = esc(r.reject_reason || '未通过审核');
+      else if(r.status === 'approved') info = '审核人 ' + esc(r.reviewed_by || '管理员') + ' · ' + esc(fmtTime(r.reviewed_at));
+      else if(r.reviewed_at) info = esc(fmtTime(r.reviewed_at));
+      h += '<tr><td class="nowrap">' + esc(fmtTime(r.created_at)) + '</td><td><b>' + esc(r.plan_name) + '</b>' + (r.note ? '<span class="sub muted">备注：' + esc(r.note) + '</span>' : '') + '</td><td class="nowrap">' + fmtPrice(r.price) + '</td><td>' + planReqStatus(r.status) + '</td><td class="muted">' + info + '</td></tr>';
+    });
+    hist.innerHTML = h + '</tbody></table>';
+  }
+}
+
+function renderAdminPlans(){
+  var nav = $('navPlan');
+  if(nav) nav.textContent = S.planPending || 0;
+  var badge = $('planPendingBadge');
+  if(badge) badge.textContent = (S.planPending || 0) + ' 待审核';
+
+  var box = $('planTable');
+  if(box){
+    var h = '<table><thead><tr><th style="min-width:150px">套餐</th><th class="ar" style="width:92px">价格</th><th class="ar" style="width:118px">Token 配额</th><th style="width:96px">有效期</th><th style="width:112px">RPM</th><th style="min-width:150px">可用模型</th><th style="width:82px">状态</th><th class="ar" style="width:148px">操作</th></tr></thead><tbody>';
+    if(!(S.plans || []).length){
+      h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>还没有套餐，点击右上角「新建套餐」创建</div></div></td></tr>';
+    }
+    (S.plans || []).forEach(function(p, i){
+      h += '<tr><td><div class="tname"><div><b>' + esc(p.name) + '</b>' + (p.description ? '<span class="sub">' + esc(p.description) + '</span>' : '') + '</div></div></td>' +
+        '<td class="ar nowrap">' + fmtPrice(p.price) + '</td>' +
+        '<td class="ar nowrap">' + fmtPlanQuota(p.quota_tokens) + '</td>' +
+        '<td class="nowrap">' + fmtPlanDays(p.duration_days) + '</td>' +
+        '<td class="nowrap">' + fmtPlanRpm(p.rpm) + '</td>' +
+        '<td class="muted">' + esc(planModelsText(p.allowed_models)) + '</td>' +
+        '<td>' + (p.enabled === false ? '<span class="badge">已下架</span>' : '<span class="badge ok">可申请</span>') + '</td>' +
+        '<td><div class="ops r"><button class="ghost sm" data-act="edit-plan" data-i="' + i + '">编辑</button><button class="soft sm" data-act="del-plan" data-i="' + i + '">删除</button></div></td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table>';
+  }
+
+  var pending = (S.planRequests || []).filter(function(r){ return r.status === 'pending'; });
+  var reqBox = $('planReqTable');
+  if(reqBox){
+    var h2 = '<table><thead><tr><th style="width:130px">申请时间</th><th style="width:138px">用户</th><th style="min-width:130px">套餐</th><th class="ar" style="width:86px">金额</th><th style="min-width:140px">备注</th><th class="ar" style="width:146px">操作</th></tr></thead><tbody>';
+    if(!pending.length){
+      h2 += '<tr><td colspan="6"><div class="empty">' + I.inbox + '<div>没有待审核的套餐申请</div></div></td></tr>';
+    }
+    pending.forEach(function(r){
+      h2 += '<tr><td class="nowrap">' + esc(fmtTime(r.created_at)) + '</td><td><b>' + esc(r.username || r.account_id) + '</b></td>' +
+        '<td><b>' + esc(r.plan_name) + '</b><span class="sub muted">' + fmtPlanQuota(r.quota_tokens) + ' · ' + fmtPlanDays(r.duration_days) + '</span></td>' +
+        '<td class="ar nowrap">' + fmtPrice(r.price) + '</td>' +
+        '<td class="muted">' + (r.note ? esc(r.note) : '-') + '</td>' +
+        '<td><div class="ops r"><button class="sm" data-act="approve-plan-req" data-id="' + esc(r.id) + '">通过</button><button class="soft sm" data-act="reject-plan-req" data-id="' + esc(r.id) + '">驳回</button></div></td></tr>';
+    });
+    reqBox.innerHTML = h2 + '</tbody></table>';
+  }
+
+  var histBox = $('planReqHistory');
+  if(histBox){
+    var list = (S.planRequests || []).slice(0, 200);
+    var h3 = '<table><thead><tr><th style="width:130px">申请时间</th><th style="width:130px">用户</th><th style="min-width:130px">套餐</th><th class="ar" style="width:86px">金额</th><th style="width:96px">状态</th><th>审核</th></tr></thead><tbody>';
+    if(!list.length){
+      h3 += '<tr><td colspan="6"><div class="empty">' + I.inbox + '<div>暂无申请记录</div></div></td></tr>';
+    }
+    list.forEach(function(r){
+      var info = '等待处理';
+      if(r.status === 'rejected') info = esc(r.reject_reason || '已驳回');
+      else if(r.status === 'approved') info = esc(r.reviewed_by || '管理员') + (r.reviewed_at ? ' · ' + esc(fmtTime(r.reviewed_at)) : '');
+      else if(r.status === 'cancelled') info = '用户取消';
+      h3 += '<tr><td class="nowrap">' + esc(fmtTime(r.created_at)) + '</td><td>' + esc(r.username || r.account_id) + '</td><td><b>' + esc(r.plan_name) + '</b>' + (r.note ? '<span class="sub muted">' + esc(r.note) + '</span>' : '') + '</td><td class="ar nowrap">' + fmtPrice(r.price) + '</td><td>' + planReqStatus(r.status) + '</td><td class="muted">' + info + '</td></tr>';
+    });
+    histBox.innerHTML = h3 + '</tbody></table>';
+  }
+}
+
+function openPlanModal(i){
+  var isNew = i < 0;
+  var p = isNew
+    ? { name:'', description:'', price:0, quota_tokens:1000000, duration_days:30, rpm:0, allowed_models:[], enabled:true }
+    : S.plans[i];
+  if(!p) return;
+  editingPlan = isNew ? '' : p.id;
+  var h = '<h3>' + (isNew ? '新建套餐' : '编辑套餐') + '</h3><p class="msub">' +
+    (isNew ? '创建后用户即可申请，审核通过后生效' : '修改只影响之后的申请与指派；已生效的账号按申请时的条款快照执行') + '</p><div class="grid">' +
+    '<label>套餐名称<input id="pl_name" type="text" maxlength="40" value="' + esc(p.name) + '" placeholder="如：基础版"></label>' +
+    '<label>价格（元，仅展示，线下收款）<input id="pl_price" type="number" min="0" step="0.01" value="' + esc(p.price || 0) + '"></label>' +
+    '<label>Token 配额（0 = 不限）<input id="pl_quota" type="number" min="0" step="1000" value="' + esc(p.quota_tokens || 0) + '"><span class="hint">按账号名下所有密钥合计；审核通过后重新计数。</span></label>' +
+    '<label>有效期（天，0 = 长期有效）<input id="pl_days" type="number" min="0" max="3650" step="1" value="' + esc(p.duration_days || 0) + '"></label>' +
+    '<label>RPM（每分钟请求数，0 = 不限）<input id="pl_rpm" type="number" min="0" max="100000" step="1" value="' + esc(p.rpm || 0) + '"><span class="hint">账号级上限，名下所有密钥合计；与密钥自身 RPM 同时生效。</span></label>' +
+    '<label>可用模型（逗号分隔，留空 = 全部）<input id="pl_models" type="text" value="' + esc((p.allowed_models || []).join(', ')) + '" placeholder="gpt-4o-mini, deepseek-chat"></label>' +
+    '<label>套餐描述（可选）<input id="pl_desc" type="text" maxlength="300" value="' + esc(p.description || '') + '"></label>' +
+    '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="pl_enabled" type="checkbox"' + (p.enabled !== false ? ' checked' : '') + '> 上架（用户可见并可申请）</label>' +
+    '</div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-plan">' + (isNew ? '创建' : '保存') + '</button></div>';
+  openModal(h, 'lg');
+}
+function savePlan(){
+  var name = ($('pl_name').value || '').trim();
+  if(!name) return toast('请填写套餐名称', 'bad');
+  var models = ($('pl_models').value || '').split(/[,，\\s]+/).map(function(m){ return m.trim(); }).filter(Boolean);
+  var payload = {
+    name: name,
+    description: ($('pl_desc').value || '').trim(),
+    price: Number($('pl_price').value) || 0,
+    quota_tokens: Math.max(0, parseInt($('pl_quota').value, 10) || 0),
+    duration_days: Math.max(0, parseInt($('pl_days').value, 10) || 0),
+    rpm: Math.max(0, parseInt($('pl_rpm').value, 10) || 0),
+    allowed_models: models,
+    enabled: $('pl_enabled').checked
+  };
+  var btn = $('modalBox').querySelector('[data-act="save-plan"]');
+  busyBtn(btn, true, '保存中…');
+  payload.action = editingPlan ? 'update' : 'create';
+  if(editingPlan) payload.id = editingPlan;
+  api('/api/admin/plans', 'POST', payload).then(function(){
+    closeModal();
+    toast(editingPlan ? '套餐已更新' : '套餐已创建', 'ok');
+    return loadAll();
+  }).catch(function(e){ busyBtn(btn, false); toast(e.message, 'bad'); });
+}
+function delPlan(i){
+  var p = S.plans[i];
+  if(!p) return;
+  confirmDlg('删除套餐', '确定删除套餐「' + p.name + '」？待审核的申请会自动驳回；已生效账号保留当前周期条款，到期后不再续期。').then(function(ok){
+    if(!ok) return;
+    api('/api/admin/plans', 'POST', { action:'delete', id:p.id }).then(function(r){
+      toast('套餐已删除' + (r.rejected_requests ? '，已驳回 ' + r.rejected_requests + ' 条待审核申请' : ''), 'ok');
+      return loadAll();
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
+}
+function openPlanRequest(id){
+  var p = planById(id);
+  if(!p) return;
+  openModal('<h3>申请套餐：' + esc(p.name) + '</h3>' +
+    '<p class="msub">提交后由管理员确认付款并审核，通过后套餐立即生效（配额重新计数）</p>' +
+    '<div class="plan-meta"><span class="chip">' + fmtPlanQuota(p.quota_tokens) + '</span><span class="chip">' + fmtPlanDays(p.duration_days) + '</span><span class="chip">' + fmtPlanRpm(p.rpm) + '</span><span class="chip">' + esc(planModelsText(p.allowed_models)) + '</span></div>' +
+    '<div class="grid" style="margin-top:12px"><label>备注（可选）<input id="pr_note" type="text" maxlength="200" placeholder="付款凭证 / 联系方式"></label></div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="submit-plan-req" data-id="' + esc(p.id) + '">提交申请</button></div>', 'sm');
+}
+function submitPlanRequest(id){
+  var note = ($('pr_note') && $('pr_note').value || '').trim();
+  var btn = $('modalBox').querySelector('[data-act="submit-plan-req"]');
+  busyBtn(btn, true, '提交中…');
+  api('/api/user/plans', 'POST', { action:'request', plan_id:id, note:note }).then(function(){
+    closeModal();
+    toast('申请已提交，等待管理员审核', 'ok');
+    return loadAll();
+  }).catch(function(e){ busyBtn(btn, false); toast(e.message, 'bad'); });
+}
+function cancelPlanRequest(id){
+  confirmDlg('取消申请', '确定取消这条套餐申请？').then(function(ok){
+    if(!ok) return;
+    api('/api/user/plans', 'POST', { action:'cancel', id:id }).then(function(){
+      toast('申请已取消', 'ok');
+      return loadAll();
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
+}
+function findPlanRequest(id){ return (S.planRequests || []).filter(function(r){ return r.id === id; })[0] || null; }
+function approvePlanRequest(id){
+  var r = findPlanRequest(id);
+  if(!r) return;
+  confirmDlg('通过申请', '确认「' + r.username + '」的「' + r.plan_name + '」申请已收款并通过？通过后立即生效，该账号名下密钥用量将清零。').then(function(ok){
+    if(!ok) return;
+    api('/api/admin/plans', 'POST', { action:'approve-request', id:id }).then(function(){
+      toast('已通过，套餐已生效', 'ok');
+      return loadAll();
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
+}
+function openRejectPlanRequest(id){
+  var r = findPlanRequest(id);
+  if(!r) return;
+  openModal('<h3>驳回申请</h3><p class="msub">' + esc(r.username) + ' · ' + esc(r.plan_name) + ' · ' + fmtPrice(r.price) + '</p>' +
+    '<div class="grid"><label>驳回原因（用户可见）<input id="pr_reason" type="text" maxlength="200" placeholder="如：未收到付款"></label></div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button class="danger" data-act="submit-reject-plan" data-id="' + esc(r.id) + '">确认驳回</button></div>', 'sm');
+}
+function rejectPlanRequest(id){
+  var reason = ($('pr_reason') && $('pr_reason').value || '').trim();
+  var btn = $('modalBox').querySelector('[data-act="submit-reject-plan"]');
+  busyBtn(btn, true, '处理中…');
+  api('/api/admin/plans', 'POST', { action:'reject-request', id:id, reason:reason }).then(function(){
+    closeModal();
+    toast('已驳回该申请', 'ok');
+    return loadAll();
+  }).catch(function(e){ busyBtn(btn, false); toast(e.message, 'bad'); });
+}
+
 /* ---------- 管理员：账号管理 ---------- */
 function filteredAccounts(){
   var el = $('acctQ');
@@ -1996,9 +2360,9 @@ function renderAccounts(){
   if(!box) return;
   $('navAcct').textContent = (S.accounts || []).length;
   var list = filteredAccounts();
-  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:170px">用户名</th><th style="width:88px">角色</th><th style="width:120px">配额</th><th class="ar" style="width:140px">已用 Tokens</th><th style="width:76px">密钥</th><th style="width:96px">安全问答</th><th class="ar" style="width:212px">操作</th></tr></thead><tbody>';
+  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:170px">用户名</th><th style="width:88px">角色</th><th style="width:132px">套餐</th><th style="width:120px">配额</th><th class="ar" style="width:140px">已用 Tokens</th><th style="width:76px">密钥</th><th style="width:96px">安全问答</th><th class="ar" style="width:212px">操作</th></tr></thead><tbody>';
   if(!list.length){
-    h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + (S.accounts.length ? '没有符合搜索条件的账号' : '暂无账号') + '</div></div></td></tr>';
+    h += '<tr><td colspan="9"><div class="empty">' + I.inbox + '<div>' + (S.accounts.length ? '没有符合搜索条件的账号' : '暂无账号') + '</div></div></td></tr>';
   }
   list.forEach(function(a){
     var idx = S.accounts.indexOf(a);
@@ -2009,6 +2373,7 @@ function renderAccounts(){
       '<td><label class="switch"><input type="checkbox" data-act="toggle-account" data-id="' + esc(a.id) + '"' + (a.enabled !== false ? ' checked' : '') + (a.is_current ? ' disabled' : '') + '><span></span></label></td>' +
       '<td><div class="tname"><div><b>' + esc(a.username) + '</b>' + (subs.length ? '<span class="sub">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
       '<td>' + (a.role === 'admin' ? '<span class="badge info">管理员</span>' : '<span class="badge">普通用户</span>') + '</td>' +
+      '<td>' + (a.plan_id ? '<span class="badge ' + (a.plan_status === 'expired' ? 'bad' : 'ok') + '">' + esc(a.plan_name) + '</span>' + (a.plan_expires_at ? '<span class="sub muted">至 ' + esc(String(a.plan_expires_at).slice(0,10)) + '</span>' : '') : '<span class="muted">—</span>') + '</td>' +
       '<td class="nowrap">' + (a.quota_tokens > 0 ? fmtNum(a.quota_tokens) : '<span class="muted">不限</span>') + '</td>' +
       '<td class="ar nowrap">' + fmtNum(a.used_tokens) + '<span class="sub muted">$' + fmtCost(a.used_cost) + '</span></td>' +
       '<td class="nowrap">' + fmtNum(a.key_count) + '</td>' +
@@ -2032,18 +2397,44 @@ function openAccountModal(i){
     h += '<label>用户名<input id="aa_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线"></label>' +
       '<label>初始密码<input id="aa_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>';
   }
+  var planOpts = '<option value="">不指定（手动配额）</option>';
+  (S.plans || []).forEach(function(p){
+    planOpts += '<option value="' + esc(p.id) + '"' + (a.plan_id === p.id ? ' selected' : '') + '>' + esc(p.name) + '（' + fmtPlanQuota(p.quota_tokens) + ' · ' + fmtPlanDays(p.duration_days) + '）</option>';
+  });
   h += '<label>角色<select id="aa_role"><option value="user"' + (a.role !== 'admin' ? ' selected' : '') + '>普通用户</option><option value="admin"' + (a.role === 'admin' ? ' selected' : '') + '>管理员</option></select></label>' +
-    '<label>Token 配额（0 = 不限）<input id="aa_quota" type="number" min="0" step="1000" value="' + esc(a.quota_tokens || 0) + '"></label>' +
+    '<label>套餐<select id="aa_plan">' + planOpts + '</select><span class="hint" id="aa_plan_hint"></span></label>' +
+    '<label>Token 配额（0 = 不限）<input id="aa_quota" type="number" min="0" step="1000" value="' + esc(a.quota_tokens || 0) + '"><span class="hint">选择套餐时会自动填入套餐配额，也可在此覆盖。</span></label>' +
     (isNew ? '' : '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="aa_enabled" type="checkbox"' + (a.enabled !== false ? ' checked' : '') + (a.is_current ? ' disabled' : '') + '> 启用该账号</label>') +
+    (!isNew && a.plan_id ? '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="aa_renew" type="checkbox"> 续期并清零用量</label>' : '') +
     '<label>安全问题（可选）<input id="aa_q" type="text" maxlength="100" placeholder="留空表示不修改"></label>' +
     '<label>安全问题答案<input id="aa_a" type="password" maxlength="100" autocomplete="off" placeholder="设置新问题时填写"></label>' +
     '</div>';
   if(!isNew && a.has_recovery){
     h += '<label class="check" style="margin-top:10px"><input id="aa_clear_sec" type="checkbox"> 清除已设置的安全问题</label>';
   }
-  h += '<p class="hint">普通用户登录后只能管理自己名下的密钥与用量；管理员可管理全部渠道、密钥与设置。</p>' +
+  h += '<p class="hint">普通用户登录后只能管理自己名下的密钥与用量；管理员可管理全部渠道、密钥与设置。套餐到期后该账号名下密钥会被拒绝调用。</p>' +
     '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-account">' + (isNew ? '创建' : '保存') + '</button></div>';
   openModal(h);
+  var sel = $('aa_plan');
+  if(sel){
+    var syncPlan = function(){
+      var hint = $('aa_plan_hint');
+      if(!hint) return;
+      if(!sel.value){
+        hint.textContent = a.plan_id ? '保存后解除套餐与到期限制（配额保留当前值）。' : '不指定套餐时按上面的配额手动控制。';
+      } else if(a.plan_id === sel.value){
+        hint.textContent = '当前套餐。套餐不变时如需续期并清零用量，请勾选下方「续期并清零用量」。';
+      } else {
+        hint.textContent = '保存后立即生效：到期时间从现在起算，名下密钥用量清零。';
+      }
+    };
+    sel.addEventListener('change', function(){
+      var p = planById(sel.value);
+      if(p) $('aa_quota').value = p.quota_tokens;
+      syncPlan();
+    });
+    syncPlan();
+  }
 }
 function saveAccount(){
   var isNew = editingAccount < 0;
@@ -2051,6 +2442,7 @@ function saveAccount(){
   var quota = Math.max(0, parseInt($('aa_quota').value, 10) || 0);
   var q = ($('aa_q').value || '').trim();
   var ans = $('aa_a').value || '';
+  var planId = $('aa_plan') ? $('aa_plan').value : '';
   var payload;
   if(isNew){
     var u = ($('aa_user').value || '').trim();
@@ -2058,10 +2450,12 @@ function saveAccount(){
     if(!u) return toast('请填写用户名', 'bad');
     if(p.length < 8) return toast('初始密码至少 8 位', 'bad');
     payload = { action: 'create', username: u, password: p, role: role, quota_tokens: quota };
+    if(planId) payload.plan_id = planId;
     if(q || ans){ payload.question = q; payload.answer = ans; }
   } else {
     var a = S.accounts[editingAccount];
-    payload = { action: 'update', id: a.id, role: role, quota_tokens: quota, enabled: $('aa_enabled').checked };
+    payload = { action: 'update', id: a.id, role: role, quota_tokens: quota, plan_id: planId, enabled: $('aa_enabled').checked };
+    if($('aa_renew') && $('aa_renew').checked) payload.renew_plan = true;
     if($('aa_clear_sec') && $('aa_clear_sec').checked) payload.clear_security = true;
     else if(q || ans){ payload.question = q; payload.answer = ans; }
   }
@@ -2117,16 +2511,19 @@ function renderAccount(){
   var box = $('acctInfo');
   if(!box) return;
   if(!ME){ box.innerHTML = ''; return; }
+  var me = (ME.role !== 'admin' && S.my) ? Object.assign({}, ME, S.my) : ME;
   var cur = (S.accounts || []).filter(function(a){ return a.is_current; })[0] || null;
   var used = S.my ? (S.my.used_tokens || 0) : (cur ? (cur.used_tokens || 0) : 0);
   var rows = [
-    ['用户名', esc(ME.username)],
-    ['角色', ME.role === 'admin' ? '管理员' : '普通用户'],
-    ['账号配额', ME.quota_tokens > 0 ? fmtNum(ME.quota_tokens) + ' Tokens' : '不限'],
+    ['用户名', esc(me.username)],
+    ['角色', me.role === 'admin' ? '管理员' : '普通用户'],
+    ['套餐', me.plan_id ? esc(me.plan_name) + ' ' + planAccountChip(me) : '<span class="muted">未开通</span>'],
+    ['套餐到期', me.plan_id ? (me.plan_expires_at ? esc(String(me.plan_expires_at).slice(0,10)) + (me.plan_days_left > 0 ? '（剩余 ' + me.plan_days_left + ' 天）' : '') : '长期有效') : '-'],
+    ['账号配额', me.quota_tokens > 0 ? fmtNum(me.quota_tokens) + ' Tokens' : '不限'],
     ['已用 Tokens', fmtNum(used)],
-    ['最近登录', fmtTime(ME.last_login_at)],
-    ['创建时间', fmtTime(ME.created_at)],
-    ['安全问题', ME.has_recovery ? '已设置' : '未设置']
+    ['最近登录', fmtTime(me.last_login_at)],
+    ['创建时间', fmtTime(me.created_at)],
+    ['安全问题', me.has_recovery ? '已设置' : '未设置']
   ];
   var h = rows.map(function(r){ return '<div class="kv"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('');
   if(ME.emergency) h += '<div class="login-warn">当前为 ADMIN_KEY 应急登录：没有关联账号，无法修改密码或安全问题。日常请使用账号登录。</div>';
@@ -2505,13 +2902,14 @@ function bindRestoreFile(){
       }
       var when = snap.created_at ? String(snap.created_at).replace('T',' ').slice(0,19) + ' UTC' : '未知时间';
       var acctTxt = Array.isArray(snap.accounts) ? '、账号（' + snap.accounts.length + ' 个，所有登录会话会失效）' : '';
+      var planTxt = Array.isArray(snap.plans) ? '、套餐（' + snap.plans.length + ' 个）' : '';
       confirmDlg('确认恢复备份',
-        '将用 ' + esc(when) + ' 的备份整体覆盖当前的渠道（' + snap.channels.length + ' 个）、密钥（' + snap.keys.length + ' 个）' + acctTxt + '与设置，且不可撤销。确定继续？'
+        '将用 ' + esc(when) + ' 的备份整体覆盖当前的渠道（' + snap.channels.length + ' 个）、密钥（' + snap.keys.length + ' 个）' + acctTxt + planTxt + '与设置，且不可撤销。确定继续？'
       ).then(function(ok){
         if(!ok) return;
         snap.confirm = true;
         api('/api/admin/restore', 'POST', snap).then(function(r){
-          toast('已恢复 ' + r.channels + ' 个渠道 / ' + r.keys + ' 个密钥' + (r.accounts != null ? ' / ' + r.accounts + ' 个账号' : '') + '，页面即将刷新', 'ok');
+          toast('已恢复 ' + r.channels + ' 个渠道 / ' + r.keys + ' 个密钥' + (r.accounts != null ? ' / ' + r.accounts + ' 个账号' : '') + (r.plans != null ? ' / ' + r.plans + ' 个套餐' : '') + '，页面即将刷新', 'ok');
           setTimeout(function(){ location.reload(); }, 1200);
         }).catch(function(e){ toast(e.message, 'bad'); });
       });
@@ -2525,6 +2923,7 @@ function renderAll(){
   if(!ME) return;
   if(ME.role !== 'admin'){
     renderMyKeys();
+    renderPlans();
     renderAccount();
     return;
   }
@@ -2533,6 +2932,7 @@ function renderAll(){
   renderOverview();
   renderChannels();
   renderKeys();
+  renderPlans();
   renderAccounts();
   renderAccount();
   if($('t-settings') && $('t-settings').classList.contains('on')) renderSettings();
@@ -2628,6 +3028,16 @@ document.addEventListener('click', function(e){
   else if(act === 'reset-account-pw') openResetAccountPw(i);
   else if(act === 'reset-account-pw-save') resetAccountPw(i);
   else if(act === 'del-account') delAccount(i);
+  else if(act === 'add-plan') openPlanModal(-1);
+  else if(act === 'edit-plan') openPlanModal(i);
+  else if(act === 'save-plan') savePlan();
+  else if(act === 'del-plan') delPlan(i);
+  else if(act === 'request-plan') openPlanRequest(el.getAttribute('data-id'));
+  else if(act === 'submit-plan-req') submitPlanRequest(el.getAttribute('data-id'));
+  else if(act === 'cancel-plan-req') cancelPlanRequest(el.getAttribute('data-id'));
+  else if(act === 'approve-plan-req') approvePlanRequest(el.getAttribute('data-id'));
+  else if(act === 'reject-plan-req') openRejectPlanRequest(el.getAttribute('data-id'));
+  else if(act === 'submit-reject-plan') rejectPlanRequest(el.getAttribute('data-id'));
   else if(act === 'change-password') changePassword();
   else if(act === 'save-security') saveSecurity();
   else if(act === 'log-prev'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), -1); loadLogs(); }
