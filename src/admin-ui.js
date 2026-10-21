@@ -2782,10 +2782,12 @@ function viewLog(i){
 function exportLogs(){
   if(!S.logs.length){ toast('当前没有可导出的日志', 'bad'); return; }
   var head = ['time', 'request_id', 'key_name', 'model', 'channel', 'ok', 'stream', 'finish', 'tokens', 'cost', 'ms', 'error'];
+  // 所有字段统一转义：双引号按 CSV 规范翻倍、换行折成空格，避免内容破坏行列结构
+  var cell = function(v){ return '"' + String(v == null ? '' : v).replace(/"/g, '""').replace(/[\\r\\n]+/g, ' ') + '"'; };
   var lines = [head.join(',')];
   S.logs.forEach(function(l){
-    var row = [l.ts, l.request_id, l.key_name, l.model, l.channel, l.ok ? 'ok' : 'fail', l.stream ? '1' : '0', l.finish || '', l.tokens, l.cost, l.ms, (l.error || '').replace(/[",\\n]/g, ' ')];
-    lines.push(row.map(function(v){ return '"' + String(v == null ? '' : v) + '"'; }).join(','));
+    var row = [l.ts, l.request_id, l.key_name, l.model, l.channel, l.ok ? 'ok' : 'fail', l.stream ? '1' : '0', l.finish || '', l.tokens, l.cost, l.ms, l.error || ''];
+    lines.push(row.map(cell).join(','));
   });
   var blob = new Blob(['\\ufeff' + lines.join('\\n')], { type: 'text/csv;charset=utf-8' });
   var a = document.createElement('a');

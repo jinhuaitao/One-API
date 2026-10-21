@@ -3755,21 +3755,23 @@ async function handleAdmin(env, ctx, request) {
 
   /* ---- 密钥 ---- */
   if (path === '/api/admin/keys' && request.method === 'GET') {
-    const keys = await r2GetJson(env, KEYS_KEY, []);
+    let keys = await r2GetJson(env, KEYS_KEY, []);
     // 惰性迁移：老数据（明文 key）在打开控制台时转哈希并写回，之后响应里不再出现明文
-    let mutated = false;
-    for (const k of keys) {
-      if (typeof k.key === 'string' && k.key) {
-        k.key_hash = await sha256Hex(k.key);
-        k.key_prefix = String(k.key).slice(0, 12);
-        delete k.key;
-        mutated = true;
-      }
-    }
-    if (mutated) {
-      ctx.waitUntil(
-        withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, keys)).then(() => invalidateCache(KEYS_KEY))
-      );
+    if (keys.some((k) => typeof k.key === 'string' && k.key)) {
+      // 锁内重读再迁移写回：直接写上面读到的旧数组会覆盖并发进来的用量累计
+      keys = await withLock(KEYS_KEY, async () => {
+        const fresh = (await r2GetJson(env, KEYS_KEY, [])) || [];
+        for (const k of fresh) {
+          if (typeof k.key === 'string' && k.key) {
+            k.key_hash = await sha256Hex(k.key);
+            k.key_prefix = String(k.key).slice(0, 12);
+            delete k.key;
+          }
+        }
+        await r2PutJson(env, KEYS_KEY, fresh);
+        return fresh;
+      });
+      invalidateCache(KEYS_KEY);
     }
     // 归属显示：普通用户自助创建的密钥带 owner_id，这里补上最新用户名
     const accounts = await loadAccounts(env);

@@ -14,8 +14,7 @@
     "test:accounts": "node test/accounts.mjs",
     "test:plans": "node test/plans.mjs",
     "test:background": "node test/background.mjs",
-    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs",
-    "preview": "node preview/build.mjs"
+    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs"
   },
   "type": "module",
   "version": "2.5.0"

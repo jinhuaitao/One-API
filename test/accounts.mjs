@@ -670,4 +670,34 @@ async function adminAccounts() {
   console.log('ok 7) 邮箱用户名：格式校验定位、大小写去重、邮箱登录、账号或密码错误提示');
 }
 
+/* ---------------- 8) 老数据明文密钥的惰性迁移 ---------------- */
+{
+  const legacyKey = 'sk-legacy-plaintext-0001';
+  const keys = JSON.parse(r2.map.get('data/keys.json'));
+  keys.push({ id: 'k_legacy', name: '老密钥', key: legacyKey, enabled: true, used_tokens: 777, requests: 9 });
+  await r2.put('data/keys.json', JSON.stringify(keys));
+
+  const r = await call('/api/admin/keys', { token: adminToken });
+  assert.equal(r.status, 200);
+  const legacy = r.data.find((k) => k.id === 'k_legacy');
+  assert.ok(legacy.key_hash && !legacy.key, '响应里不应再出现明文密钥');
+  assert.equal(legacy.key_prefix, legacyKey.slice(0, 12));
+  assert.equal(legacy.used_tokens, 777, '迁移不得丢用量');
+
+  const { createHash } = await import('node:crypto');
+  const expect = createHash('sha256').update(legacyKey).digest('hex');
+  assert.equal(legacy.key_hash, expect, '哈希应与明文密钥对应');
+
+  const stored = r2.map.get('data/keys.json');
+  assert.ok(!stored.includes(legacyKey), '迁移后明文不得落盘');
+
+  const again = await call('/api/admin/keys', { token: adminToken });
+  assert.equal(r2.map.get('data/keys.json'), stored, '二次读取不应重复写回（幂等）');
+  assert.ok(again.data.find((k) => k.id === 'k_legacy').key_hash);
+
+  const c = await chat(legacyKey);
+  assert.equal(c.status, 200, '迁移后的老密钥应仍能调通');
+  console.log('ok 8) 明文密钥惰性迁移：转哈希落盘、用量保留、幂等、迁移后可调用');
+}
+
 console.log('accounts: all passed');
