@@ -703,7 +703,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div class="grid">
             <label>默认 RPM（每密钥每分钟请求数，0 = 不限）<input type="number" id="s_rpm_default" min="0" max="100000" step="1"><span class="hint">未单独设置 RPM 的密钥沿用此值。Workers 多实例下为软限制（实际上限 ≈ 配置 × 实例数），用于防单 Key 打爆上游；计费级强配额请用密钥的 Token 配额。</span></label>
             <label>每日自动备份保留份数<input type="number" id="s_backup_keep" min="0" max="365" step="1"><span class="hint">每天首个请求把渠道 / 密钥 / 设置 / 账号 / 套餐与申请记录快照到 backup/<日期>.json，超期自动清理。0 = 关闭自动备份。</span></label>
-            <label>定时巡检间隔（分钟）<input type="number" id="s_patrol_min" min="0" max="1440" step="5"><span class="hint">Cron 每 10 分钟唤起，巡检按此间隔执行：对每个启用渠道的每个 Key 发一次真实小请求（耗少量上游额度），状态翻转时发 Telegram 通知；过期日志清理（每天一次）与备份兜底不受此项影响。0 = 关闭定时巡检，默认 30。</span></label>
+            <label>内置保活间隔（分钟）<input type="number" id="s_patrol_min" min="0" max="1440" step="5"><span class="hint">无需 Cron / 定时任务：网关收到任意请求（包括 /healthz 探活）时，会在响应后于后台检查，到期就对每个启用渠道的每个 Key 发一次真实小请求（耗少量上游额度），同时更新渠道健康状态，状态翻转时发 Telegram 通知。过期日志清理（每天一次）与备份兜底也由该机制顺带完成。完全没有流量时 Worker 不会被唤醒，恢复流量后的首个请求会补跑。0 = 关闭内置保活，默认 30。</span></label>
           </div>
           <div class="grid" style="margin-top:12px">
             <label>Telegram Bot Token<input type="password" id="s_tg_token" placeholder="123456:ABC-DEF..." autocomplete="off"><span class="hint">找 @BotFather 创建 Bot 获取；留空则不通知。</span></label>
@@ -715,7 +715,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           </div>
           <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <button class="soft sm" data-act="test-notify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>发送测试消息</button>
-            <span class="muted" style="font-size:12px">填完 Token 与 Chat ID 即可测试（无需先保存）；渠道告警只在巡检发现状态翻转时发送</span>
+            <span class="muted" style="font-size:12px">填完 Token 与 Chat ID 即可测试（无需先保存）；渠道告警只在保活 / 巡检发现状态翻转时发送</span>
           </div>
         </div>
         <div class="card">

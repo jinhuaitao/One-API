@@ -10,12 +10,13 @@
     "deploy": "node scripts/ensure-r2.mjs && wrangler deploy",
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
-    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/scheduled.mjs",
+    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs",
     "test:accounts": "node test/accounts.mjs",
     "test:plans": "node test/plans.mjs",
-    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/scheduled.mjs",
+    "test:background": "node test/background.mjs",
+    "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs",
     "preview": "node preview/build.mjs"
   },
   "type": "module",
-  "version": "2.3.0"
+  "version": "2.4.0"
 }

@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
@@ -300,10 +300,12 @@ function defaultSettings() {
      */
     backup_keep_days: 7,
     /**
-     * 定时巡检间隔（分钟）：Cron 每 10 分钟唤起一次，巡检按这个间隔节流。
-     * 巡检会对每个启用渠道的每个 Key 各发一次真实小请求（耗少量上游额度），
-     * 状态翻转时按 tg_notify_down / tg_notify_up 发 Telegram 通知。
-     * 0 = 关闭定时巡检（每日日志清理与备份兜底不受影响）。
+     * 内置保活 / 巡检间隔（分钟）：不依赖 Cron。
+     * 网关收到任意请求（含 /healthz 探活）时，会在响应后于后台检查一次；
+     * 到期就对每个启用渠道的每个 Key 各发一次真实小请求（耗少量上游额度），
+     * 顺带更新渠道健康状态，状态翻转时按 tg_notify_down / tg_notify_up 发 Telegram 通知。
+     * 0 = 关闭内置保活（每日日志清理与备份兜底同样由请求顺带触发，
+     * 但完全没有流量时 Worker 不会被唤醒——Workers 没有常驻时钟）。
      */
     patrol_interval_min: 30,
     /**
@@ -2939,21 +2941,25 @@ async function deletePrefix(env, prefix) {
 
 /* ---------------- 渠道连通性测试 ---------------- */
 
-/** 测试单个渠道的每个 Key，返回逐 Key 结果 */
-async function testChannel(env, ch, settings) {
+/**
+ * 测试单个渠道的每个 Key，返回逐 Key 结果。
+ * opts.parallelKeys 时并发探测各 Key（内置保活使用）；手动测试保持串行，
+ * 避免一次点击把所有 Key 同时打满。
+ */
+async function testChannel(env, ch, settings, opts = {}) {
   const keys = channelKeys(ch);
   if (!keys.length) {
     return { ok: false, keys: [], error: '该渠道未配置 API Key' };
   }
   const model = (ch.models || []).find((m) => m !== '*') || 'test';
   const timeoutMs = channelTimeoutMs(ch, settings);
-  const results = [];
-  for (let i = 0; i < keys.length; i++) {
+
+  const probeKey = async (key, i) => {
     const started = Date.now();
     try {
       const { res: upstream, translated } = await forwardOnce(
         ch,
-        keys[i],
+        key,
         '/v1/chat/completions',
         { model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16 },
         settings
@@ -2963,14 +2969,13 @@ async function testChannel(env, ch, settings) {
         const text = await withBodyTimeout(upstream, timeoutMs, (r) => r.text()).catch(
           () => ''
         );
-        results.push({
+        return {
           index: i + 1,
           ok: false,
           ms,
           http_status: upstream.status,
           error: text.slice(0, 300) || `HTTP ${upstream.status}`,
-        });
-        continue;
+        };
       }
       const data = await withBodyTimeout(upstream, timeoutMs, (r) => r.json()).catch(
         () => null
@@ -2985,15 +2990,22 @@ async function testChannel(env, ch, settings) {
       } else if (data && data.choices && data.choices[0]) {
         snippet = String(data.choices[0].message?.content || '').slice(0, 200);
       }
-      results.push({ index: i + 1, ok: true, ms, http_status: upstream.status, snippet });
+      return { index: i + 1, ok: true, ms, http_status: upstream.status, snippet };
     } catch (e) {
-      results.push({
+      return {
         index: i + 1,
         ok: false,
         ms: Date.now() - started,
         error: String((e && e.message) || e).slice(0, 300),
-      });
+      };
     }
+  };
+
+  const results = opts.parallelKeys
+    ? await Promise.all(keys.map((key, i) => probeKey(key, i)))
+    : [];
+  if (!opts.parallelKeys) {
+    for (let i = 0; i < keys.length; i++) results.push(await probeKey(keys[i], i));
   }
   return { ok: results.some((r) => r.ok), keys: results };
 }
@@ -4547,35 +4559,80 @@ async function handleAdmin(env, ctx, request) {
   return err('未知管理接口', 404, 'not_found');
 }
 
-/* ---------------- 定时任务（Cron Trigger） ---------------- */
+/* ---------------- 内置保活 / 后台维护（请求触发，无 Cron） ---------------- */
 
-const CRON_STATE_KEY = 'data/cron-state.json';
+/** 沿用旧文件名，升级后保留已有的巡检 / 清理节流状态 */
+const BG_STATE_KEY = 'data/cron-state.json';
 /** 流式异常率告警阈值（常量，不做成设置项：个人网关量级下够用，避免设置膨胀） */
 const STREAM_ALERT_MIN_STREAMS = 20;
 /** 当日流式异常结束占比达到此值才告警 */
 const STREAM_ALERT_RATE = 0.3;
 /** 两次异常率告警至少间隔 6 小时 */
 const STREAM_ALERT_COOLDOWN_MS = 6 * 3600 * 1000;
+/** 流式异常率的检查间隔：避免每个后台检查都读一次当日统计 */
+const STREAM_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+/** 单个 isolate 的后台检查间隔：每 30 秒最多读一次状态，具体任务再按各自间隔节流 */
+const BG_CHECK_INTERVAL_MS = 30 * 1000;
+/** 内置保活的单渠道探测上限：必须远小于 ctx.waitUntil 的生命期，避免死渠道拖住整轮 */
+const BG_PROBE_TIMEOUT_MS = 8000;
 
-/** 巡检全部渠道（与控制台「全部测试」同一逻辑，管理接口与定时任务共用） */
-async function patrolAllChannels(env, ctx, settings) {
+/**
+ * 巡检/保活全部渠道（与控制台「全部测试」同一逻辑，管理接口与内置保活共用）。
+ * opts.probeTimeoutMs > 0 时收紧单个渠道的探测超时：内置保活在 ctx.waitUntil
+ * 的生命期内执行，不能沿用普通请求 60s 的超时，否则一个死渠道会拖垮整轮维护。
+ * opts.parallel 时并发探测各渠道（内置保活使用）；手动「全部测试」保持串行。
+ */
+async function patrolAllChannels(env, ctx, settings, opts = {}) {
   const channels = await r2GetJson(env, CHANNELS_KEY, []);
-  const results = [];
-  for (const ch of channels) {
-    if (!ch.enabled) {
-      results.push({ id: ch.id, name: ch.name, skipped: true, ok: false });
-      continue;
-    }
-    const r = await testChannel(env, ch, settings);
+  const probeTimeoutMs = opts.probeTimeoutMs | 0;
+  const probeSettings = probeTimeoutMs
+    ? {
+        ...settings,
+        request_timeout_ms: Math.min(settings.request_timeout_ms || 60000, probeTimeoutMs),
+      }
+    : settings;
+  const runOne = async (ch) => {
+    if (!ch.enabled) return { id: ch.id, name: ch.name, skipped: true, ok: false };
+    const probeCh = probeTimeoutMs
+      ? {
+          ...ch,
+          timeout_ms: Math.min(
+            (ch.timeout_ms || probeSettings.request_timeout_ms) | 0,
+            probeTimeoutMs
+          ),
+        }
+      : ch;
+    const r = await testChannel(
+      env,
+      probeCh,
+      probeSettings,
+      opts.parallel ? { parallelKeys: true } : undefined
+    );
     const firstOk = (r.keys || []).find((k) => k.ok);
     const health = {
       ok: !!r.ok,
       ms: firstOk ? firstOk.ms : ((r.keys || [])[0] || {}).ms || 0,
       message: r.ok ? '' : String(((r.keys || [])[0] || {}).error || r.error || '测试失败').slice(0, 200),
     };
-    results.push({ id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error });
     await saveChannelHealth(env, ch.id, health, { settings, ctx });
+    return { id: ch.id, name: ch.name, ok: !!r.ok, keys: r.keys, error: r.error };
+  };
+
+  // 内置保活并发探测各渠道，把整轮压进 waitUntil 生命期；手动「全部测试」保持串行
+  if (opts.parallel) {
+    return Promise.all(
+      channels.map((ch) =>
+        runOne(ch).catch((e) => ({
+          id: ch.id,
+          name: ch.name,
+          ok: false,
+          error: String((e && e.message) || e).slice(0, 200),
+        }))
+      )
+    );
   }
+  const results = [];
+  for (const ch of channels) results.push(await runOne(ch));
   return results;
 }
 
@@ -4599,16 +4656,19 @@ async function cleanupExpiredLogs(env, settings, daysOverride) {
 }
 
 /**
- * 定时任务主流程：Cron 每 10 分钟唤起一次，各项工作按 data/cron-state.json
- * 里的状态各自节流，互不阻塞定性：
- *  1) 每日备份兜底——当天一个请求都没有时也不会漏（maybeAutoBackup 自带按日去重）；
- *  2) 过期日志清理——每天最多执行一次，让「日志保留天数」从手动按钮变成自动生效；
- *  3) 渠道巡检——按 patrol_interval_min 节流，状态翻转的 TG 通知在 saveChannelHealth 内；
- *  4) 流式异常率告警——看真实流量统计（不依赖巡检），超阈值且过了冷却期才发 TG。
+ * 内置保活 / 后台维护主流程：不依赖 Cron，由任意入站请求在响应后唤起。
+ * 各项任务按 data/cron-state.json 里的状态各自节流，互不阻塞响应：
+ *  1) 每日备份兜底——每天首个请求触发一次快照（maybeAutoBackup 自带按日去重）；
+ *  2) 过期日志清理——每天最多执行一次，让「日志保留天数」自动生效；
+ *  3) 渠道保活/巡检——按 patrol_interval_min 节流，对每个启用渠道的每个 Key
+ *     发一次真实小请求，状态翻转的 TG 通知在 saveChannelHealth 内；
+ *  4) 流式异常率告警——看真实流量统计，超阈值且过了冷却期才发 TG。
+ *
+ * 完全没有请求时不会运行（Workers 没有常驻时钟）；恢复流量后的首个请求会补跑。
  */
-async function runScheduledTasks(env, ctx) {
+async function runBackgroundTasks(env, ctx) {
   const settings = await loadSettings(env);
-  const state = (await r2GetJson(env, CRON_STATE_KEY, {})) || {};
+  const state = (await r2GetJson(env, BG_STATE_KEY, {})) || {};
   const now = Date.now();
   const today = dateStr(now, settings.timezone_offset_minutes);
   let dirty = false;
@@ -4616,38 +4676,81 @@ async function runScheduledTasks(env, ctx) {
   await maybeAutoBackup(env, ctx, settings);
 
   if (state.last_cleanup_date !== today) {
-    await cleanupExpiredLogs(env, settings);
-    state.last_cleanup_date = today;
-    dirty = true;
+    try {
+      await cleanupExpiredLogs(env, settings);
+      state.last_cleanup_date = today;
+      dirty = true;
+    } catch {
+      // 清理失败不阻断渠道保活；下个检查周期重试
+    }
   }
 
   const intervalMin = settings.patrol_interval_min | 0;
   if (intervalMin > 0 && now - (state.last_patrol_at || 0) >= intervalMin * 60000) {
-    await patrolAllChannels(env, ctx, settings);
+    // 先落盘「已开始」再探测：多实例并发时后来者会看到新时间戳而跳过。
+    // 跨 isolate 仍是 best-effort，但足以避免正常流量下的重复保活。
     state.last_patrol_at = now;
     dirty = true;
+    await r2PutJson(env, BG_STATE_KEY, state).catch(() => {});
+    try {
+      await patrolAllChannels(env, ctx, settings, {
+        probeTimeoutMs: BG_PROBE_TIMEOUT_MS,
+        parallel: true,
+      });
+    } catch {
+      // 单次保活失败不阻断清理 / 告警；下个间隔重试
+    }
   }
 
   if (
     settings.tg_bot_token &&
     settings.tg_chat_id &&
-    now - (state.last_stream_alert_at || 0) >= STREAM_ALERT_COOLDOWN_MS
+    now - (state.last_stream_check_at || 0) >= STREAM_CHECK_INTERVAL_MS
   ) {
-    const stats = await r2GetJson(env, STATS_PREFIX + today + '.json', null);
-    const streams = (stats && stats.streams) || 0;
-    const aborted = (stats && stats.streams_aborted) || 0;
-    if (streams >= STREAM_ALERT_MIN_STREAMS && aborted / streams >= STREAM_ALERT_RATE) {
-      const pct = Math.round((aborted / streams) * 100);
-      await sendTelegram(
-        settings,
-        `🚨 [One-API] 今日流式异常率过高\n流式请求 ${streams} 次，异常结束 ${aborted} 次（${pct}%）\n多为上游断流 / 网关超时，请到控制台日志页按「仅异常结束」筛选查看。\n时间：${nowIso()}`
-      );
-      state.last_stream_alert_at = now;
-      dirty = true;
+    state.last_stream_check_at = now;
+    dirty = true;
+    if (now - (state.last_stream_alert_at || 0) >= STREAM_ALERT_COOLDOWN_MS) {
+      const stats = await r2GetJson(env, STATS_PREFIX + today + '.json', null);
+      const streams = (stats && stats.streams) || 0;
+      const aborted = (stats && stats.streams_aborted) || 0;
+      if (streams >= STREAM_ALERT_MIN_STREAMS && aborted / streams >= STREAM_ALERT_RATE) {
+        const pct = Math.round((aborted / streams) * 100);
+        await sendTelegram(
+          settings,
+          `🚨 [One-API] 今日流式异常率过高\n流式请求 ${streams} 次，异常结束 ${aborted} 次（${pct}%）\n多为上游断流 / 网关超时，请到控制台日志页按「仅异常结束」筛选查看。\n时间：${nowIso()}`
+        );
+        state.last_stream_alert_at = now;
+      }
     }
   }
 
-  if (dirty) await r2PutJson(env, CRON_STATE_KEY, state).catch(() => {});
+  if (dirty) await r2PutJson(env, BG_STATE_KEY, state).catch(() => {});
+}
+
+/* 单实例节流：每个请求都只做一次内存判断，真正的工作放进 waitUntil，不阻塞响应 */
+let bgNextCheckAt = 0;
+let bgRunning = false;
+
+/** 请求入口调用：任意请求（含 /healthz 探活）都能驱动内置保活 */
+function scheduleBackgroundWork(env, ctx) {
+  if (!ctx || typeof ctx.waitUntil !== 'function') return;
+  const now = Date.now();
+  if (bgRunning || now < bgNextCheckAt) return;
+  bgNextCheckAt = now + BG_CHECK_INTERVAL_MS;
+  bgRunning = true;
+  ctx.waitUntil(
+    runBackgroundTasks(env, ctx)
+      .catch(() => {})
+      .finally(() => {
+        bgRunning = false;
+      })
+  );
+}
+
+/** 测试用：清空 isolate 级节流，让下一次请求立即执行后台检查 */
+function resetBackgroundThrottle() {
+  bgNextCheckAt = 0;
+  bgRunning = false;
 }
 
 /* ---------------- 入口 ---------------- */
@@ -4678,11 +4781,9 @@ export default {
     // 版本号优先取 wrangler.toml [vars] 的 APP_VERSION（部署时与 package.json 同步维护），回退源码常量
     const version = env.APP_VERSION || VERSION;
 
-    // 每日惰性备份：每天首个请求触发一次快照（异步，不阻塞请求；失败完全静默）
-    if (path !== '/healthz' && path !== '/health') {
-      const bootSettings = await loadSettings(env);
-      ctx.waitUntil(maybeAutoBackup(env, ctx, bootSettings));
-    }
+    // 内置保活：任意请求（含 /healthz 探活）都会在响应后触发一次后台维护，
+    // 不需要 Cron；各项任务按状态节流，备份/清理/渠道保活都不阻塞当前响应。
+    scheduleBackgroundWork(env, ctx);
 
     if (path === '/' && request.method === 'GET') {
       return json({
@@ -4764,11 +4865,6 @@ export default {
 
     return err('Not Found', 404, 'not_found');
   },
-
-  /** Cron Trigger 入口（wrangler.toml [triggers]，每 10 分钟唤起，内部再节流） */
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(runScheduledTasks(env, ctx).catch(() => {}));
-  },
 };
 
 // 导出纯函数，便于单测（wrangler 只使用 default 导出）
@@ -4792,5 +4888,6 @@ export {
   partitionByLongTask,
   patrolAllChannels,
   cleanupExpiredLogs,
-  runScheduledTasks,
+  runBackgroundTasks,
+  resetBackgroundThrottle,
 };
