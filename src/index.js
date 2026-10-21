@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';

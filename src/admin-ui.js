@@ -248,9 +248,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .nowrap{white-space:nowrap}
   .sub{font-size:11.5px;color:var(--muted);display:block;margin-top:2px;font-weight:400}
   .url{font-family:var(--mono);font-size:12px;color:var(--text2);display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .phead{display:flex;gap:8px;font-size:11.5px;color:var(--muted);padding:0 0 7px;text-transform:uppercase;letter-spacing:.05em}
-  .phead span{flex:1}
-  .phead span:last-child{flex:0 0 34px;width:34px}
   .bhead,.brow{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px}
   .bhead{border-bottom:1px solid var(--border);color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;padding-top:0}
   .bhead span:first-child,.brow span:first-child{flex:0 0 110px;font-family:var(--mono)}
@@ -317,8 +314,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   @keyframes pop{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
   .modal h3{margin:0 0 4px;font-size:16px;font-weight:650}
   .modal .msub{color:var(--muted);font-size:12.5px;margin:0 0 14px;line-height:1.6}
-  .maprow,.hdrrow,.prow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-  .maprow input,.hdrrow input,.prow input{flex:1;font-family:var(--mono);font-size:12px}
+  .maprow,.hdrrow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .maprow input,.hdrrow input{flex:1;font-family:var(--mono);font-size:12px}
   #toasts{position:fixed;right:20px;bottom:20px;z-index:99;display:flex;flex-direction:column;gap:9px;max-width:min(370px,90vw)}
   .toast{background:var(--elev);border:1px solid var(--border);border-left:3px solid var(--accent);padding:12px 15px;border-radius:var(--r-md);font-size:13px;box-shadow:var(--sh-2);transition:opacity .3s,transform .3s;animation:slide .26s var(--ease-out);display:flex;align-items:flex-start;gap:9px;line-height:1.55}
   .toast .ticon{flex-shrink:0;font-weight:700;line-height:1.5}
@@ -447,12 +444,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <button class="navbtn" data-tab="plans" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5z"/><path d="m3 8.5 9 5.5 9-5.5M12 14v7"/></svg>套餐管理<span class="badge-n" id="navPlan">0</span></button>
       <button class="navbtn" data-tab="accounts" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 21a6.5 6.5 0 0 1 13 0"/><path d="M16 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.6a6.5 6.5 0 0 1 3.5 6.4"/></svg>账号管理<span class="badge-n" id="navAcct">0</span></button>
       <button class="navbtn" data-tab="settings" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.1"/><circle cx="15" cy="12" r="2.1"/><circle cx="8" cy="17" r="2.1"/></svg>网关设置</button>
+      <button class="navbtn" data-tab="system" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>系统设置</button>
       <button class="navbtn" data-tab="help" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>使用说明</button>
       <button class="navbtn" data-tab="account" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>我的账号</button>
     </nav>
     <div class="side-foot">
       <div class="side-row">
-        <div class="grow"><b id="meName">—</b><span id="meRole">未登录</span> · <span id="appVer">v2.3.0</span><span class="hint" id="appVerNote" style="display:none">（UI 与后端版本不一致，刷新后自动同步）</span></div>
+        <div class="grow"><b id="meName">—</b><span id="meRole">未登录</span> · <span id="appVer">v2.5.0</span><span class="hint" id="appVerNote" style="display:none">（UI 与后端版本不一致，刷新后自动同步）</span></div>
         <button class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
         <button class="icon-btn" data-act="logout" title="退出登录" aria-label="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg></button>
       </div>
@@ -662,14 +660,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <p class="hint" style="margin-top:8px">ADMIN_KEY 同时保留为控制台的应急登录凭据（登录页「应急 ADMIN_KEY」）；日常请使用账号密码登录。</p>
         </div>
         <div class="card">
-          <div class="card-head"><div><h3>账号与安全</h3><p class="desc">注册开关、问答找回密码与新用户默认配额</p></div></div>
-          <div class="grid">
-            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_reg"> 开放自助注册</label>
-            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_recovery"> 允许问答找回密码</label>
-            <label>新用户默认 Token 配额（0 = 不限）<input type="number" id="s_default_user_quota" min="0" step="1000"><span class="hint">注册与管理员新建普通账号时的初始配额；按账号名下所有密钥合计计算。</span></label>
-          </div>
-        </div>
-        <div class="card">
           <div class="card-head"><div><h3>性能与容错</h3><p class="desc">作用于所有渠道的默认值，单个渠道可单独覆盖超时</p></div></div>
           <div class="grid">
             <label>请求超时（毫秒，作用于首字节）<input type="number" id="s_timeout" min="1000" max="600000" step="1000"></label>
@@ -680,6 +670,21 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <label>长任务分流阈值（max_tokens）<input type="number" id="s_longtask" min="0" max="200000" step="500"><span class="hint">请求的 max_tokens ≥ 该值时视为长输出任务，挑渠道时把渠道编辑里未勾选「长输出稳定」的渠道排到候选队尾（仍可用，只是靠后）。适合「某渠道长流经常在尾部被上游切断」的场景。0 = 关闭分流。</span></label>
             <label>下游保活间隔（毫秒）<input type="number" id="s_stream_ka" min="0" max="600000" step="1000"><span class="hint">网关超过该时长没向调用方下发任何字节时，主动补一条 SSE 注释（": ka"，客户端会忽略），防止模型长思考 / 上游排队期间的「零字节窗口」被中间的 nginx / CDN / 客户端读超时掐断。与「流式静默超时」互补：一个管上游→网关，一个管网关→调用方。0 = 关闭，默认 15000。</span></label>
             <label>瞬时错误重试次数（429 / 5xx / 网络异常）<input type="number" id="s_retries" min="0" max="5" step="1"></label>
+          </div>
+        </div>
+        <div class="row end" style="margin-top:18px">
+          <button class="ghost" data-act="reset-settings">重新载入</button>
+          <button data-act="save-settings">保存设置</button>
+        </div>
+      </section>
+
+      <section id="t-system" class="tab">
+        <div class="card">
+          <div class="card-head"><div><h3>账号与安全</h3><p class="desc">注册开关、问答找回密码与新用户默认配额</p></div></div>
+          <div class="grid">
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_reg"> 开放自助注册</label>
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_recovery"> 允许问答找回密码</label>
+            <label>新用户默认 Token 配额（0 = 不限）<input type="number" id="s_default_user_quota" min="0" step="1000"><span class="hint">注册与管理员新建普通账号时的初始配额；按账号名下所有密钥合计计算。</span></label>
           </div>
         </div>
         <div class="card">
@@ -729,17 +734,6 @@ export const ADMIN_HTML = `<!DOCTYPE html>
           <div id="backupList" class="muted" style="font-size:12.5px">加载中…</div>
           <input type="file" id="restoreFile" accept="application/json,.json" style="display:none">
         </div>
-        <div class="card">
-          <div class="card-head">
-            <div><h3>模型定价</h3><p class="desc">单位：美元 / 每 100 万 Tokens，用于估算费用（不影响转发）</p></div>
-            <button class="ghost sm" data-act="price-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>添加模型</button>
-          </div>
-          <div class="grid" style="margin-bottom:12px">
-            <label>默认输入价<input type="number" id="s_pin" min="0" step="0.001"></label>
-            <label>默认输出价<input type="number" id="s_pout" min="0" step="0.001"></label>
-          </div>
-          <div id="priceRows"></div>
-        </div>
         <div class="row end" style="margin-top:18px">
           <button class="ghost" data-act="reset-settings">重新载入</button>
           <button data-act="save-settings">保存设置</button>
@@ -750,7 +744,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <div class="card help">
           <h3>快速上手</h3>
           <ol>
-            <li>首次打开控制台会要求创建管理员账号；之后可在「账号管理」创建成员账号，或在「网关设置 → 账号与安全」开放自助注册。</li>
+            <li>首次打开控制台会要求创建管理员账号；之后可在「账号管理」创建成员账号，或在「系统设置 → 账号与安全」开放自助注册。</li>
             <li>在「渠道管理」添加上游渠道：<code>OpenAI 兼容</code>（OpenAI / DeepSeek / Moonshot 等）或 <code>Anthropic 原生</code>（Base URL 填 <code>https://api.anthropic.com</code>）。<b>Base URL 末尾不要带 <code>/v1</code></b>，网关会自动拼接路径。</li>
             <li>点击渠道行的「测试」验证连通性，确认返回成功后再启用；也可用「全部测试」批量巡检。</li>
             <li>在「密钥管理」生成网关密钥并分发给调用方（可设置配额、有效期、允许调用的模型）。</li>
@@ -822,9 +816,9 @@ var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor
 var editingCh = -1, editingKey = -1, editingAccount = -1, editingPlan = '';
 var RANGE = 14, METRIC = 'requests';
 var autoTimer = null;
-var ADMIN_TABS = ['overview','logs','channels','keys','plans','accounts','settings','help'];
+var ADMIN_TABS = ['overview','logs','channels','keys','plans','accounts','settings','system','help'];
 var USER_TABS = ['mykeys','plans','account'];
-var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], mykeys:['我的密钥','管理自己的网关密钥与用量'], plans:['套餐','套餐选择、申请与审核'], accounts:['账号管理','管理员与普通用户账号'], account:['我的账号','密码与安全问题'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试、定价与日志策略'], help:['使用说明','接入方式与功能说明'] };
+var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], mykeys:['我的密钥','管理自己的网关密钥与用量'], plans:['套餐','套餐选择、申请与审核'], accounts:['账号管理','管理员与普通用户账号'], account:['我的账号','密码与安全问题'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试与流式策略'], system:['系统设置','账号安全、日志统计、通知与备份'], help:['使用说明','接入方式与功能说明'] };
 
 var I = {
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>',
@@ -1495,7 +1489,7 @@ function gotoTab(t){
   $('pageDesc').textContent = meta[1];
   document.title = meta[0] ? meta[0] + ' · OneAPI Gateway' : 'OneAPI Gateway · 控制台';
   if(t === 'logs'){ if(!$('logDate').value) $('logDate').value = S.serverToday || todayLocal(); loadLogs(true); }
-  if(t === 'settings') renderSettings();
+  if(t === 'settings' || t === 'system') renderSettings();
   if(t === 'mykeys') renderMyKeys();
   if(t === 'plans') renderPlans();
   if(t === 'accounts') renderAccounts();
@@ -1621,7 +1615,7 @@ function renderStats(){
   html += statCard({ label:'请求总数', value: fmtNum(t.requests), delta: deltaBadge(t.requests, pv && pv.requests), sub:'近 ' + RANGE + ' 天 · 流式 ' + fmtNum(t.streams) + (aborted ? ' · 异常结束 ' + fmtNum(aborted) : ''), icon: I.list });
   html += statCard({ label:'成功率', value: rate + '%', sub:'成功 ' + fmtNum(t.ok) + ' · 失败 ' + fmtNum(t.failed), icon: I.check, tone: t.requests ? tone : '' });
   html += statCard({ label:'Tokens', value: fmtNum(t.tokens), delta: deltaBadge(t.tokens, pv && pv.tokens), sub:'输入 + 输出合计', icon: I.bolt });
-  html += statCard({ label:'预估费用', value: '$' + fmtCost(t.cost), delta: deltaBadge(t.cost, pv && pv.cost), sub:'按定价表估算（USD）', icon: I.coin });
+  html += statCard({ label:'预估费用', value: '$' + fmtCost(t.cost), delta: deltaBadge(t.cost, pv && pv.cost), sub:'按已保存的定价估算（USD）', icon: I.coin });
   html += statCard({ label:'平均延迟', value: fmtMs(t.avg_ms), sub:'含上游排队与生成', icon: I.clock });
   html += statCard({ label:'启用资源', value: enCh + ' / ' + enKey, sub:'渠道 / 有效密钥', icon: I.server });
   $('statCards').innerHTML = html;
@@ -2828,34 +2822,9 @@ function renderSettings(){
   $('s_tg_chat').value = s.tg_chat_id || '';
   $('s_tg_down').checked = s.tg_notify_down !== false;
   $('s_tg_up').checked = s.tg_notify_up === true;
-  var dp = s.default_pricing || { in:0, out:0 };
-  $('s_pin').value = dp.in || 0;
-  $('s_pout').value = dp.out || 0;
-  renderPriceRows(s.pricing || {});
   renderBackups();
 }
-function priceRowHtml(model, p){
-  return '<div class="prow"><input class="p_model" type="text" placeholder="模型名" value="' + esc(model || '') + '">' +
-    '<input class="p_in" type="number" min="0" step="0.001" placeholder="输入价" value="' + esc((p && p.in) || 0) + '">' +
-    '<input class="p_out" type="number" min="0" step="0.001" placeholder="输出价" value="' + esc((p && p.out) || 0) + '">' +
-    '<button class="icon-btn" data-act="price-del" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>';
-}
-function renderPriceRows(pricing){
-  var keys = Object.keys(pricing || {});
-  var h = '<div class="phead"><span>模型名</span><span>输入 / 1M（USD）</span><span>输出 / 1M（USD）</span><span></span></div>';
-  if(!keys.length) h += '<div class="muted" style="font-size:12.5px;padding:6px 0">暂无按模型定价，未列出的模型将使用上方默认价。</div>';
-  keys.forEach(function(m){ h += priceRowHtml(m, pricing[m]); });
-  $('priceRows').innerHTML = h;
-}
 function collectSettings(){
-  var pricing = {};
-  document.querySelectorAll('#priceRows .prow').forEach(function(row){
-    var m = row.querySelector('.p_model');
-    if(!m) return;
-    var name = m.value.trim();
-    if(!name) return;
-    pricing[name] = { in: Number(row.querySelector('.p_in').value) || 0, out: Number(row.querySelector('.p_out').value) || 0 };
-  });
   var tz = parseInt($('s_tz').value, 10);
   if(!Number.isFinite(tz)) tz = 480;
   return {
@@ -2889,8 +2858,6 @@ function collectSettings(){
     log_retention_days: parseInt($('s_retention').value, 10) || 30,
     timezone_offset_minutes: tz,
     custom_models: $('s_models').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
-    default_pricing: { in: Number($('s_pin').value) || 0, out: Number($('s_pout').value) || 0 },
-    pricing: pricing,
     rpm_default: Math.max(0, parseInt($('s_rpm_default').value, 10) || 0),
     backup_keep_days: Math.max(0, parseInt($('s_backup_keep').value, 10) || 0),
     patrol_interval_min: Math.min(1440, Math.max(0, parseInt($('s_patrol_min').value, 10) || 0)),
@@ -3045,7 +3012,7 @@ function renderAll(){
   renderPlans();
   renderAccounts();
   renderAccount();
-  if($('t-settings') && $('t-settings').classList.contains('on')) renderSettings();
+  if($('t-settings') && ($('t-settings').classList.contains('on') || ($('t-system') && $('t-system').classList.contains('on')))) renderSettings();
 }
 
 /* ---------- 全局事件 ---------- */
@@ -3186,8 +3153,6 @@ document.addEventListener('click', function(e){
   else if(act === 'export-logs') exportLogs();
   else if(act === 'save-settings') saveSettings(el);
   else if(act === 'reset-settings'){ renderSettings(); toast('已重新载入'); }
-  else if(act === 'price-add') $('priceRows').insertAdjacentHTML('beforeend', priceRowHtml('', { in:0, out:0 }));
-  else if(act === 'price-del') el.closest('.prow').remove();
   else if(act === 'cleanup-logs') cleanupLogs(el);
   else if(act === 'backup-export') exportBackup(el);
   else if(act === 'backup-download') downloadBackupDate(el.getAttribute('data-d'), el);
