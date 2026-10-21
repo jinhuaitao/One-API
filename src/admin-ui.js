@@ -337,7 +337,16 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   .login-card input{margin-bottom:11px;text-align:center}
   .login-card button{width:100%}
   .login-tip{margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.65}
-  .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:var(--r-sm);padding:9px 11px;text-align:left}
+  .login-warn{margin-top:12px;color:var(--warn);background:var(--warn-soft);border:1px solid transparent;border-radius:var(--r-sm);padding:9px 11px;text-align:left;font-size:12px;line-height:1.6}
+  .login-card .auth-form{text-align:left;margin-top:4px}
+  .login-card .auth-form label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text2);margin-bottom:11px}
+  .login-card .auth-form input{margin-bottom:0;text-align:left}
+  .login-card .auth-form .hint{font-size:11.5px;color:var(--muted);line-height:1.6}
+  .login-card .auth-links{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:12px}
+  .login-card a.link{color:var(--accent);cursor:pointer;text-decoration:none}
+  .login-card a.link:hover{text-decoration:underline}
+  .login-card .auth-q{background:var(--panel2);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;font-size:13px;color:var(--text);margin-bottom:11px;line-height:1.6;text-align:left}
+  .login-card .auth-q span{display:block;font-size:11.5px;color:var(--muted);margin-bottom:3px}
 
   /* ============================================================
      使用说明
@@ -396,11 +405,9 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <div class="login-overlay on" id="login">
   <div class="login-card">
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg></div>
-    <h2>OneAPI Gateway</h2>
-    <p>请输入 Admin Key 以进入管理控制台</p>
-    <input id="ak" type="password" placeholder="Admin Key" autocomplete="off">
-    <button id="btnLogin">进入控制台</button>
-    <div class="login-tip">Admin Key 即部署时设置的 <code>ADMIN_KEY</code> Secret，仅保存在浏览器本地。登录后刷新页面无需重复输入（浏览器禁用本地存储时除外）。</div>
+    <h2 id="authTitle">OneAPI Gateway</h2>
+    <p id="authSub">正在检查登录状态…</p>
+    <div id="authBox"></div>
     <div class="login-tip login-warn" id="storeWarn" style="display:none"></div>
   </div>
 </div>
@@ -412,19 +419,24 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <div><b>OneAPI Gateway</b><span>管理控制台</span></div>
     </div>
     <nav class="nav">
-      <div class="navsec">监控</div>
-      <button class="navbtn on" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>概览</button>
-      <button class="navbtn" data-tab="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>请求日志</button>
-      <div class="navsec">资源</div>
-      <button class="navbtn" data-tab="channels"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>渠道管理<span class="badge-n" id="navCh">0</span></button>
-      <button class="navbtn" data-tab="keys"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.6"/><path d="M10.1 12.9 20.5 2.5"/><path d="M17 6l2 2M19.5 3.5l2 2"/></svg>密钥管理<span class="badge-n" id="navKey">0</span></button>
-      <div class="navsec">系统</div>
-      <button class="navbtn" data-tab="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.1"/><circle cx="15" cy="12" r="2.1"/><circle cx="8" cy="17" r="2.1"/></svg>网关设置</button>
-      <button class="navbtn" data-tab="help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>使用说明</button>
+      <div class="navsec" data-admin>监控</div>
+      <button class="navbtn on" data-tab="overview" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>概览</button>
+      <button class="navbtn" data-tab="logs" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>请求日志</button>
+      <div class="navsec" data-admin>资源</div>
+      <button class="navbtn" data-tab="channels" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>渠道管理<span class="badge-n" id="navCh">0</span></button>
+      <button class="navbtn" data-tab="keys" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.6"/><path d="M10.1 12.9 20.5 2.5"/><path d="M17 6l2 2M19.5 3.5l2 2"/></svg>密钥管理<span class="badge-n" id="navKey">0</span></button>
+      <div class="navsec" data-user>我的</div>
+      <button class="navbtn" data-tab="mykeys" data-user><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.6"/><path d="M10.1 12.9 20.5 2.5"/><path d="M17 6l2 2M19.5 3.5l2 2"/></svg>我的密钥<span class="badge-n" id="navMyKey">0</span></button>
+      <button class="navbtn" data-tab="account" data-user><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>我的账号</button>
+      <div class="navsec" data-admin>系统</div>
+      <button class="navbtn" data-tab="accounts" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 21a6.5 6.5 0 0 1 13 0"/><path d="M16 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.6a6.5 6.5 0 0 1 3.5 6.4"/></svg>账号管理<span class="badge-n" id="navAcct">0</span></button>
+      <button class="navbtn" data-tab="settings" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.1"/><circle cx="15" cy="12" r="2.1"/><circle cx="8" cy="17" r="2.1"/></svg>网关设置</button>
+      <button class="navbtn" data-tab="help" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>使用说明</button>
+      <button class="navbtn" data-tab="account" data-admin><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>我的账号</button>
     </nav>
     <div class="side-foot">
       <div class="side-row">
-        <div class="grow"><b id="appVer">v2.2.0</b>Cloudflare R2 存储<span class="hint" id="appVerNote" style="display:none">（UI 与后端版本不一致，刷新后自动同步）</span></div>
+        <div class="grow"><b id="meName">—</b><span id="meRole">未登录</span> · <span id="appVer">v2.3.0</span><span class="hint" id="appVerNote" style="display:none">（UI 与后端版本不一致，刷新后自动同步）</span></div>
         <button class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
         <button class="icon-btn" data-act="logout" title="退出登录" aria-label="退出登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg></button>
       </div>
@@ -512,6 +524,60 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
       </section>
 
+      <section id="t-mykeys" class="tab">
+        <div class="card">
+          <div class="card-head">
+            <div><h3>我的用量</h3><p class="desc">账号配额按名下所有密钥合计计算，由管理员设置</p></div>
+            <button class="sm" data-act="my-add-key"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>生成密钥</button>
+          </div>
+          <div class="stats" id="myStats"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><div><h3>我的密钥</h3><p class="desc">密钥仅在创建时完整显示一次；遗失请重新生成</p></div></div>
+          <div id="myKeyTable"></div>
+        </div>
+      </section>
+
+      <section id="t-accounts" class="tab">
+        <div class="card">
+          <div class="toolbar">
+            <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="acctQ" type="text" placeholder="搜索用户名"></div>
+            <div class="spacer"></div>
+            <button class="sm" data-act="add-account"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建账号</button>
+          </div>
+          <p class="desc">管理员可管理全部渠道、密钥与设置；普通用户登录后只能管理自己名下的密钥与用量。</p>
+          <div id="acctTable"></div>
+        </div>
+      </section>
+
+      <section id="t-account" class="tab">
+        <div class="card">
+          <div class="card-head"><div><h3>账号信息</h3><p class="desc">当前登录身份、角色与配额</p></div></div>
+          <div id="acctInfo"></div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-head"><div><h3>修改密码</h3><p class="desc">修改后其他设备上的登录会失效</p></div></div>
+            <div class="grid" style="grid-template-columns:1fr">
+              <label>当前密码<input id="ac_old" type="password" autocomplete="current-password"></label>
+              <label>新密码（8~128 位）<input id="ac_new" type="password" autocomplete="new-password"></label>
+              <label>确认新密码<input id="ac_new2" type="password" autocomplete="new-password"></label>
+            </div>
+            <div class="row end"><button data-act="change-password">保存新密码</button></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><div><h3>安全问题</h3><p class="desc">忘记密码时用于自助找回（需管理员开启）</p></div></div>
+            <div class="grid" style="grid-template-columns:1fr">
+              <label>安全问题<input id="ac_q" type="text" maxlength="100" placeholder="如：我的第一只宠物叫什么"></label>
+              <label>答案<input id="ac_a" type="password" autocomplete="off" placeholder="答案不区分大小写与空格"></label>
+              <label>当前密码（验证身份）<input id="ac_pw" type="password" autocomplete="current-password"></label>
+            </div>
+            <p class="hint" id="acSecHint"></p>
+            <div class="row end"><button data-act="save-security">保存安全问题</button></div>
+          </div>
+        </div>
+      </section>
+
       <section id="t-logs" class="tab">
         <div class="card">
           <div class="toolbar">
@@ -539,6 +605,15 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <div class="card">
           <div class="card-head"><div><h3>安全</h3><p class="desc">控制管理密钥是否可直接用于业务调用</p></div></div>
           <label class="check"><input type="checkbox" id="s_allow_admin"> 允许用 ADMIN_KEY 直接调用 /v1/*（便于自测，生产建议关闭）</label>
+          <p class="hint" style="margin-top:8px">ADMIN_KEY 同时保留为控制台的应急登录凭据（登录页「应急 ADMIN_KEY」）；日常请使用账号密码登录。</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><div><h3>账号与安全</h3><p class="desc">注册开关、问答找回密码与新用户默认配额</p></div></div>
+          <div class="grid">
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_reg"> 开放自助注册</label>
+            <label class="check" style="justify-content:flex-start"><input type="checkbox" id="s_allow_recovery"> 允许问答找回密码</label>
+            <label>新用户默认 Token 配额（0 = 不限）<input type="number" id="s_default_user_quota" min="0" step="1000"><span class="hint">注册与管理员新建普通账号时的初始配额；按账号名下所有密钥合计计算。</span></label>
+          </div>
         </div>
         <div class="card">
           <div class="card-head"><div><h3>性能与容错</h3><p class="desc">作用于所有渠道的默认值，单个渠道可单独覆盖超时</p></div></div>
@@ -591,7 +666,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         </div>
         <div class="card">
           <div class="card-head">
-            <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置的完整快照；恢复会整体覆盖当前配置</p></div>
+            <div><h3>备份与恢复</h3><p class="desc">渠道 / 密钥 / 设置 / 账号的完整快照；恢复会整体覆盖当前配置与账号</p></div>
             <div style="display:flex;gap:8px">
               <button class="soft sm" data-act="backup-export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>立即导出</button>
               <button class="ghost sm" data-act="backup-restore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>从文件恢复</button>
@@ -621,6 +696,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
         <div class="card help">
           <h3>快速上手</h3>
           <ol>
+            <li>首次打开控制台会要求创建管理员账号；之后可在「账号管理」创建成员账号，或在「网关设置 → 账号与安全」开放自助注册。</li>
             <li>在「渠道管理」添加上游渠道：<code>OpenAI 兼容</code>（OpenAI / DeepSeek / Moonshot 等）或 <code>Anthropic 原生</code>（Base URL 填 <code>https://api.anthropic.com</code>）。<b>Base URL 末尾不要带 <code>/v1</code></b>，网关会自动拼接路径。</li>
             <li>点击渠道行的「测试」验证连通性，确认返回成功后再启用；也可用「全部测试」批量巡检。</li>
             <li>在「密钥管理」生成网关密钥并分发给调用方（可设置配额、有效期、允许调用的模型）。</li>
@@ -646,13 +722,21 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <li><code>temperature</code> 会自动钳制到 0~1；<code>system</code> / <code>developer</code> 消息合并为 Anthropic 的 <code>system</code>。</li>
             <li>连续同角色消息会自动合并（Anthropic 要求角色交替），多条 <code>tool</code> 结果会合并为一条。</li>
           </ul>
+          <h4>账号与权限</h4>
+          <ul>
+            <li><b>管理员</b>：管理渠道、全部密钥、账号、设置与日志；<b>普通用户</b>：登录后只能创建/管理自己名下的密钥并查看自己的用量。</li>
+            <li>账号配额按用户名下所有密钥的已用 Tokens 合计，达到配额后该账号的所有密钥都会被拒绝；单个用户最多 20 个密钥。</li>
+            <li>「问答找回密码」需用户在「我的账号」中设置安全问题；管理员可在设置中关闭该功能，改用「账号管理 → 重置密码」。</li>
+            <li>部署时配置的 <code>ADMIN_KEY</code> 保留为应急凭据：可在登录页以「应急 ADMIN_KEY」进入，不影响日常账号登录。</li>
+          </ul>
           <h4>数据存储</h4>
-          <p>全部数据存放于 Cloudflare R2：<code>data/channels.json</code>（渠道）、<code>data/keys.json</code>（密钥）、<code>data/settings.json</code>（设置）、<code>data/stats/&lt;日期&gt;.json</code>（按天统计）、<code>logs/&lt;日期&gt;/</code>（请求日志）。可在渠道页「导出」备份配置。</p>
+          <p>全部数据存放于 Cloudflare R2：<code>data/channels.json</code>（渠道）、<code>data/keys.json</code>（密钥）、<code>data/settings.json</code>（设置）、<code>data/accounts.json</code>（账号，密码与密保答案仅存 PBKDF2 哈希）、<code>data/sessions.json</code>（登录会话，仅存 token 哈希）、<code>data/stats/&lt;日期&gt;.json</code>（按天统计）、<code>logs/&lt;日期&gt;/</code>（请求日志）。可在「备份与恢复」导出完整快照。</p>
           <h4>接口一览</h4>
           <ul>
             <li><code>GET /v1/models</code>、<code>POST /v1/chat/completions</code>、<code>POST /v1/completions</code>、<code>POST /v1/embeddings</code></li>
             <li><code>GET /healthz</code> 健康检查；<code>GET /</code> 网关状态</li>
-            <li>管理接口均在 <code>/api/admin/*</code>，需请求头 <code>X-Admin-Key</code></li>
+            <li>管理接口均在 <code>/api/admin/*</code>，需登录会话 <code>X-Session-Token</code>，或应急 <code>X-Admin-Key</code></li>
+            <li>账号接口 <code>/api/auth/*</code>（初始化、登录、注册、找回密码），用户密钥接口 <code>/api/user/*</code></li>
           </ul>
         </div>
       </section>
@@ -665,12 +749,18 @@ export const ADMIN_HTML = `<!DOCTYPE html>
 <div id="toasts"></div>
 
 <script>
-var AK = '';
-var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
-var editingCh = -1, editingKey = -1;
+var TOKEN = '';
+var AK = ''; // 应急 ADMIN_KEY：只存 sessionStorage，不长期落盘
+var ME = null;
+var AUTH = { initialized: true, allow_registration: false, allow_password_recovery: true, admin_key_configured: false };
+var authMode = 'login';
+var RECOVERY = { username: '', question: '' };
+var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [] };
+var editingCh = -1, editingKey = -1, editingAccount = -1;
 var RANGE = 14, METRIC = 'requests';
 var autoTimer = null;
-var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试、定价与日志策略'], help:['使用说明','接入方式与功能说明'] };
+var ADMIN_TABS = ['overview','logs','channels','keys','accounts','settings','help'];
+var TITLES = { overview:['概览','网关运行状态与用量趋势'], channels:['渠道管理','上游渠道配置与连通性'], keys:['密钥管理','网关密钥发放与用量'], mykeys:['我的密钥','管理自己的网关密钥与用量'], accounts:['账号管理','管理员与普通用户账号'], account:['我的账号','密码与安全问题'], logs:['请求日志','按天查看转发明细'], settings:['网关设置','超时、重试、定价与日志策略'], help:['使用说明','接入方式与功能说明'] };
 
 var I = {
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>',
@@ -695,7 +785,8 @@ var store = {
   },
   del: function(k){ try{ window.localStorage.removeItem(k); }catch(e){} }
 };
-AK = store.get('og_admin_key') || '';
+TOKEN = store.get('og_session') || '';
+try { AK = window.sessionStorage.getItem('og_admin_key') || ''; } catch(e){ AK = ''; }
 
 function $(id){ return document.getElementById(id); }
 function p2(n){ return (n < 10 ? '0' : '') + n; }
@@ -746,8 +837,15 @@ window.addEventListener('error', function(e){
   try{ toast('页面错误：' + (e.message || '未知错误'), 'bad'); }catch(_){}
 });
 
-function api(path, method, body){
-  var opt = { method: method || 'GET', headers: { 'X-Admin-Key': AK } };
+function apiHeaders(){
+  var h = {};
+  if(TOKEN) h['X-Session-Token'] = TOKEN;
+  else if(AK) h['X-Admin-Key'] = AK;
+  return h;
+}
+/** 不带登录态的请求：登录 / 注册 / 找回等公开接口用，避免错误地触发「被踢出登录」 */
+function fetchJson(path, method, body, headers){
+  var opt = { method: method || 'GET', headers: headers || {} };
   if(body !== undefined){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   return fetch(path, opt).then(function(r){
     return r.json().catch(function(){ return { error: { message: '响应解析失败' } }; }).then(function(d){
@@ -755,28 +853,40 @@ function api(path, method, body){
         var e = new Error((d.error && d.error.message) || ('HTTP ' + r.status));
         e.status = r.status;
         e.code = (d.error && d.error.code) || '';
-        // 只有 401/403 才说明 Key 失效；其余错误（5xx / 网络抖动）不应把用户踢出登录
-        if(r.status === 401 || r.status === 403) markLoggedOut(e.message);
         throw e;
       }
       return d;
     });
   });
 }
-function isAuthErr(e){ return !!e && (e.status === 401 || e.status === 403); }
-function isKeyMissing(e){ return !!e && e.code === 'admin_key_missing'; }
-
-/** Key 已失效：回到登录页（幂等，避免多个并发请求重复弹窗） */
+function api(path, method, body){
+  return fetchJson(path, method, body, apiHeaders()).catch(function(e){
+    if(isSessionErr(e)) markLoggedOut(e.message);
+    throw e;
+  });
+}
+function isSessionErr(e){
+  return !!e && (e.status === 401 || (e.status === 403 && e.code === 'account_disabled'));
+}
+function clearEmergency(){
+  AK = '';
+  try{ window.sessionStorage.removeItem('og_admin_key'); }catch(e){}
+}
+function saveEmergency(key){
+  AK = key;
+  try{ window.sessionStorage.setItem('og_admin_key', key); }catch(e){}
+}
+/** 会话失效：回到登录页（幂等，避免多个并发请求重复弹窗） */
 var authLost = false;
 function markLoggedOut(msg){
   if(authLost) return;
   authLost = true;
-  store.del('og_admin_key');
-  AK = '';
+  store.del('og_session');
+  clearEmergency();
+  TOKEN = ''; ME = null;
   if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
   setConn('fail');
-  $('login').classList.add('on');
-  toast(msg || 'Admin Key 已失效，请重新输入', 'bad');
+  bootAuth(msg || '登录状态已失效，请重新登录');
 }
 /** localStorage 是否真的可用（隐私模式 / 第三方 iframe 下会抛异常） */
 function storageOk(){
@@ -793,10 +903,10 @@ function warnNoStorage(){
   storageWarned = true;
   var el = $('storeWarn');
   if(el){
-    el.textContent = '当前浏览器禁用了本地存储（隐私模式或第三方 iframe 内嵌），因此刷新页面后需要重新输入 Admin Key。请在新标签页直接打开本控制台。';
+    el.textContent = '当前浏览器禁用了本地存储（隐私模式或第三方 iframe 内嵌），因此刷新页面后需要重新登录。请在新标签页直接打开本控制台。';
     el.style.display = 'block';
   }
-  toast('当前浏览器禁用了本地存储，刷新后需要重新输入 Admin Key', 'bad');
+  toast('当前浏览器禁用了本地存储，刷新后需要重新登录', 'bad');
 }
 
 function openModal(html, size){
@@ -851,28 +961,263 @@ function setConn(state){
   else if(state === 'wait'){ pill.className = 'pill wait'; pill.innerHTML = '<span class="dt"></span>连接中…'; }
   else { pill.className = 'pill'; pill.innerHTML = '<span class="dt"></span>未连接'; }
 }
-function doLogout(){
-  store.del('og_admin_key');
-  AK = '';   authLost = false;
-  S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [] };
-  if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
-  var akInput = $('ak'); if(akInput) akInput.value = '';
-  var di = $('logDate'); if(di) di.value = '';
-  setConn('off');
+function updateVersion(v){
+  if(!v) return;
+  try{
+    var el = $('appVer');
+    if(el && el.textContent !== 'v' + v){
+      el.textContent = 'v' + v;
+      var note = $('appVerNote');
+      if(note) note.style.display = '';
+    }
+  }catch(e){}
+}
+
+/* 登录 / 注册 / 找回 / 初始化：同一个卡片按状态切换内容 */
+function showAuth(mode, msg){
+  if(mode === 'register' && !AUTH.allow_registration) mode = 'login';
+  if(mode === 'recover' && !AUTH.allow_password_recovery) mode = 'login';
+  if(mode === 'setup' && AUTH.initialized) mode = 'login';
+  authMode = mode;
+  var box = $('authBox');
+  if(!box) return;
   $('login').classList.add('on');
-  renderAll();
-  if(akInput){ try{ akInput.focus(); }catch(e){} }
-  toast('已退出登录');
+  var title = 'OneAPI Gateway', sub = '', h = '';
+  if(mode === 'setup'){
+    title = '初始化管理员账号';
+    sub = '首次使用：创建管理员账号后即可进入控制台，无需再配置 ADMIN_KEY。';
+    h = '<div class="auth-form">' +
+      '<label>管理员用户名<input id="a_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线" autocomplete="username"></label>' +
+      '<label>密码<input id="a_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+      '<label>确认密码<input id="a_pass2" type="password" maxlength="128" autocomplete="new-password"></label>' +
+      '<label>安全问题<input id="a_q" type="text" maxlength="100" placeholder="如：我的第一只宠物叫什么"></label>' +
+      '<label>安全问题答案<input id="a_a" type="password" maxlength="100" autocomplete="off"><span class="hint">用于忘记密码时自助找回；答案不区分大小写与空格。</span></label>' +
+      '<button data-act="auth-setup">创建管理员账号</button></div>';
+  } else if(mode === 'login'){
+    title = '登录控制台';
+    sub = '使用账号密码登录';
+    var links = [];
+    if(AUTH.allow_registration) links.push('<a class="link" data-act="auth-mode" data-mode="register">注册账号</a>');
+    if(AUTH.allow_password_recovery) links.push('<a class="link" data-act="auth-mode" data-mode="recover">忘记密码</a>');
+    if(AUTH.admin_key_configured) links.push('<a class="link" data-act="auth-mode" data-mode="emergency">应急 ADMIN_KEY</a>');
+    h = '<div class="auth-form">' +
+      '<label>用户名<input id="a_user" type="text" maxlength="24" autocomplete="username"></label>' +
+      '<label>密码<input id="a_pass" type="password" maxlength="128" autocomplete="current-password"></label>' +
+      '<button data-act="auth-login">登录</button></div>' +
+      (links.length ? '<div class="auth-links">' + links.join('') + '</div>' : '');
+  } else if(mode === 'register'){
+    title = '注册账号';
+    sub = '注册后可以创建自己的网关密钥并查看用量';
+    h = '<div class="auth-form">' +
+      '<label>用户名<input id="a_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线" autocomplete="username"></label>' +
+      '<label>密码<input id="a_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+      '<label>确认密码<input id="a_pass2" type="password" maxlength="128" autocomplete="new-password"></label>' +
+      '<label>安全问题<input id="a_q" type="text" maxlength="100" placeholder="如：我的第一只宠物叫什么"></label>' +
+      '<label>安全问题答案<input id="a_a" type="password" maxlength="100" autocomplete="off"><span class="hint">用于忘记密码时自助找回。</span></label>' +
+      '<button data-act="auth-register">注册并登录</button></div>' +
+      '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
+  } else if(mode === 'recover'){
+    title = '找回密码';
+    sub = '输入用户名，通过安全问题重置密码';
+    h = '<div class="auth-form">' +
+      '<label>用户名<input id="r_user" type="text" maxlength="24" autocomplete="username"></label>' +
+      '<button data-act="auth-lookup">下一步</button></div>' +
+      '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
+  } else if(mode === 'recover2'){
+    title = '找回密码';
+    sub = '回答安全问题并设置新密码';
+    h = '<div class="auth-form">' +
+      '<div class="auth-q"><span>安全问题</span>' + esc(RECOVERY.question) + '</div>' +
+      '<label>答案<input id="r_a" type="password" maxlength="100" autocomplete="off"></label>' +
+      '<label>新密码<input id="r_new" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+      '<label>确认新密码<input id="r_new2" type="password" maxlength="128" autocomplete="new-password"></label>' +
+      '<button data-act="auth-recover">重置密码</button></div>' +
+      '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
+  } else if(mode === 'emergency'){
+    title = '应急登录';
+    sub = '使用部署时配置的 ADMIN_KEY 临时进入控制台';
+    h = '<div class="auth-form">' +
+      '<label>ADMIN_KEY<input id="e_key" type="password" autocomplete="off"></label>' +
+      '<button data-act="auth-emergency">进入控制台</button></div>' +
+      '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回账号登录</a></div>' +
+      '<div class="login-tip">应急登录只保存在当前标签页，关闭标签页即失效。</div>';
+  } else {
+    title = '无法连接服务端';
+    sub = '请检查网络或稍后重试';
+    h = '<div class="auth-form"><button data-act="auth-retry">重试</button></div>';
+  }
+  $('authTitle').textContent = title;
+  $('authSub').textContent = sub;
+  box.innerHTML = h + (msg ? '<div class="login-warn">' + esc(msg) + '</div>' : '');
+  var first = box.querySelector('input');
+  if(first){ try{ first.focus(); }catch(e){} }
+}
+
+function busyBtn(btn, on, txt){
+  if(!btn) return;
+  if(on){
+    btn.dataset.old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = txt || '处理中…';
+  } else {
+    btn.disabled = false;
+    if(btn.dataset.old) btn.textContent = btn.dataset.old;
+  }
+}
+function finishLogin(r){
+  TOKEN = r.token || '';
+  ME = r.user || null;
+  authLost = false;
+  if(TOKEN && !store.set('og_session', TOKEN)) warnNoStorage();
+  $('login').classList.remove('on');
+  setConn('ok');
+  applyRole();
+  return loadAll().then(function(failed){
+    if(failed && failed.length) toast(failed.length + ' 个接口暂时不可用，其余数据已正常显示', 'bad');
+  }).catch(function(e){
+    if(!isSessionErr(e)) toast(e.message, 'bad');
+  });
+}
+function setupAdmin(){
+  var btn = document.querySelector('[data-act="auth-setup"]');
+  var u = $('a_user').value.trim(), p = $('a_pass').value, p2 = $('a_pass2').value;
+  var q = $('a_q').value.trim(), a = $('a_a').value;
+  if(!u) return toast('请填写用户名', 'bad');
+  if(p.length < 8) return toast('密码至少 8 位', 'bad');
+  if(p !== p2) return toast('两次输入的密码不一致', 'bad');
+  if(!q) return toast('请填写安全问题', 'bad');
+  if(!a) return toast('请填写安全问题答案', 'bad');
+  busyBtn(btn, true, '创建中…');
+  fetchJson('/api/auth/setup', 'POST', { username: u, password: p, question: q, answer: a }).then(function(r){
+    toast('管理员账号已创建', 'ok');
+    return finishLogin(r);
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+    if(e.code === 'already_initialized') bootAuth();
+  });
+}
+function loginSubmit(){
+  var btn = document.querySelector('[data-act="auth-login"]');
+  var u = $('a_user').value.trim(), p = $('a_pass').value;
+  if(!u || !p) return toast('请输入用户名与密码', 'bad');
+  busyBtn(btn, true, '登录中…');
+  fetchJson('/api/auth/login', 'POST', { username: u, password: p }).then(function(r){
+    return finishLogin(r);
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function registerSubmit(){
+  var btn = document.querySelector('[data-act="auth-register"]');
+  var u = $('a_user').value.trim(), p = $('a_pass').value, p2 = $('a_pass2').value;
+  var q = $('a_q').value.trim(), a = $('a_a').value;
+  if(!u) return toast('请填写用户名', 'bad');
+  if(p.length < 8) return toast('密码至少 8 位', 'bad');
+  if(p !== p2) return toast('两次输入的密码不一致', 'bad');
+  if(!q) return toast('请填写安全问题', 'bad');
+  if(!a) return toast('请填写安全问题答案', 'bad');
+  busyBtn(btn, true, '注册中…');
+  fetchJson('/api/auth/register', 'POST', { username: u, password: p, question: q, answer: a }).then(function(r){
+    toast('注册成功，已自动登录', 'ok');
+    return finishLogin(r);
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function recoveryLookup(){
+  var btn = document.querySelector('[data-act="auth-lookup"]');
+  var u = $('r_user').value.trim();
+  if(!u) return toast('请输入用户名', 'bad');
+  busyBtn(btn, true, '查询中…');
+  fetchJson('/api/auth/recovery?username=' + encodeURIComponent(u)).then(function(r){
+    RECOVERY = { username: r.username, question: r.question };
+    showAuth('recover2');
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function recoveryReset(){
+  var btn = document.querySelector('[data-act="auth-recover"]');
+  var a = $('r_a').value, p = $('r_new').value, p2 = $('r_new2').value;
+  if(!a) return toast('请填写安全问题答案', 'bad');
+  if(p.length < 8) return toast('新密码至少 8 位', 'bad');
+  if(p !== p2) return toast('两次输入的新密码不一致', 'bad');
+  busyBtn(btn, true, '重置中…');
+  fetchJson('/api/auth/recover', 'POST', { username: RECOVERY.username, answer: a, new_password: p }).then(function(){
+    toast('密码已重置，请使用新密码登录', 'ok');
+    showAuth('login');
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function emergencyLogin(){
+  var key = $('e_key').value.trim();
+  if(!key) return toast('请输入 ADMIN_KEY', 'bad');
+  saveEmergency(key);
+  connect(false);
+}
+
+/** 拉取公开状态，决定显示初始化 / 登录 / 离线 */
+function bootAuth(msg){
+  return fetchJson('/api/auth/state').then(function(st){
+    AUTH = st || AUTH;
+    updateVersion(st && st.version);
+    authLost = false;
+    if(!AUTH.initialized){ showAuth('setup', msg); setConn('off'); return; }
+    if(TOKEN || AK){ connect(true, msg); return; }
+    showAuth('login', msg);
+    setConn('off');
+  }).catch(function(e){
+    showAuth('offline', e.message || '网络异常');
+  });
+}
+
+function resetState(){
+  S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [] };
+  if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+}
+function doLogout(){
+  var token = TOKEN;
+  var done = function(){
+    store.del('og_session');
+    clearEmergency();
+    TOKEN = ''; ME = null; authLost = false;
+    resetState();
+    var di = $('logDate'); if(di) di.value = '';
+    var la = $('logAuto'); if(la) la.checked = false;
+    setConn('off');
+    renderAll();
+    toast('已退出登录');
+    bootAuth();
+  };
+  if(token) fetchJson('/api/auth/logout', 'POST', {}, { 'X-Session-Token': token }).then(done, done);
+  else done();
 }
 
 /** 逐个接口独立请求：某个接口挂了不影响其它数据，也不会把用户踢出登录。
- *  返回「失败的接口清单」；只有在明确 401/403 时才 reject。 */
+ *  返回「失败的接口清单」；只有会话失效（401）才 reject。 */
 function loadAll(){
+  if(!ME) return Promise.resolve([]);
+  if(ME.role !== 'admin'){
+    return api('/api/user/keys').then(function(r){
+      S.my = r.account || null;
+      S.mykeys = r.keys || [];
+      renderAll();
+      return [];
+    });
+  }
   var jobs = [
+    api('/api/auth/me').then(function(v){ if(v && v.user) ME = v.user; }),
     api('/api/admin/channels').then(function(v){ S.channels = v || []; }),
     api('/api/admin/keys').then(function(v){ S.keys = v || []; }),
     api('/api/admin/settings').then(function(v){ S.settings = v || {}; }),
     api('/api/admin/stats?days=' + RANGE).then(function(v){ S.stats = v || null; }),
+    api('/api/admin/accounts').then(function(v){ S.accounts = (v && v.accounts) || []; }),
     api('/api/admin/logs/dates').then(function(v){
       // 用服务端（按设置里的时区偏移）算出的「今天」作为默认查询日期，
       // 避免浏览器时区与 Worker 的 UTC 时区不一致导致查不到刚产生的日志
@@ -884,8 +1229,9 @@ function loadAll(){
   return Promise.all(jobs.map(function(p){
     return p.catch(function(e){ failed.push(e); });
   })).then(function(){
-    var authFail = failed.filter(isAuthErr)[0];
+    var authFail = failed.filter(isSessionErr)[0];
     if(authFail) throw authFail;
+    applyRole();
     var di = $('logDate');
     if(di && !di.value) di.value = S.serverToday || todayLocal();
     S.logDate = di ? di.value : S.serverToday;
@@ -895,83 +1241,75 @@ function loadAll(){
   });
 }
 
-/** 鉴权探针：'ok' 有效 / 'bad' 明确无效 / 'unknown' 无法判定（网络故障等） */
-function probeAuth(){
-  return api('/api/admin/ping').then(function(v){
-    // 版本号单一真源在后端（src/index.js 的 VERSION，可用 env.APP_VERSION 覆盖）：
-    // 鉴权探针本来就要调 ping，顺带把侧栏版本同步成后端返回值，
-    // 避免 UI 里硬编码的版本与实际部署的 Worker 脱节。
-    try {
-      if (v && v.version) {
-        var el = $('appVer');
-        if (el && el.textContent !== 'v' + v.version) {
-          el.textContent = 'v' + v.version;
-          var note = $('appVerNote');
-          if (note) note.style.display = '';
-        }
-      }
-    } catch (e) {}
-    return 'ok';
-  }).catch(function(e){
-    if(isAuthErr(e) || isKeyMissing(e)) return 'bad';
-    if(e.status === 404){
-      // 兼容尚未部署 ping 接口的旧版 Worker：退回用 settings 判断
-      return api('/api/admin/settings').then(function(){ return 'ok'; }).catch(function(e2){
-        if(isAuthErr(e2) || isKeyMissing(e2)) return 'bad';
-        return 'unknown';
-      });
-    }
-    return 'unknown';
-  });
+function currentTab(){
+  var on = document.querySelector('.tab.on');
+  return on ? on.id.slice(2) : 'overview';
+}
+function applyRole(){
+  var admin = !!(ME && ME.role === 'admin');
+  document.querySelectorAll('[data-admin]').forEach(function(el){ el.style.display = admin ? '' : 'none'; });
+  document.querySelectorAll('[data-user]').forEach(function(el){ el.style.display = admin ? 'none' : ''; });
+  if($('meName')) $('meName').textContent = ME ? ME.username : '—';
+  if($('meRole')) $('meRole').textContent = ME ? ((admin ? '管理员' : '普通用户') + (ME.emergency ? ' · 应急' : '')) : '未登录';
+  var tab = currentTab();
+  var allowed = admin ? ADMIN_TABS.concat(['account']) : ['mykeys', 'account'];
+  if(allowed.indexOf(tab) < 0) gotoTab(admin ? 'overview' : 'mykeys');
 }
 
-function connect(silent){
-  if(!AK){
-    if(!silent) toast('请先输入 Admin Key', 'bad');
-    $('login').classList.add('on');
+function connect(silent, pendingMsg){
+  if(!TOKEN && !AK){
+    showAuth('login', pendingMsg);
+    setConn('off');
     return;
   }
-  authLost = false;   // 本轮尝试重新计，用于判断是否已由 markLoggedOut 提示过
+  var emergency = !TOKEN && !!AK;
+  authLost = false;
   setConn('wait');
-  probeAuth().then(function(auth){
-    if(auth === 'bad'){
-      // Key 确实无效（或服务端没配 ADMIN_KEY）才回登录页。
-      // 401 时 markLoggedOut 已经清过缓存并提示过，这里不重复弹 toast。
-      var alreadyTold = authLost;
-      authLost = true;
-      setConn('fail');
-      $('login').classList.add('on');
-      if(!alreadyTold) toast(silent ? '登录已失效，请重新输入 Admin Key' : 'Admin Key 不正确，请检查后重试', 'bad');
-      return;
-    }
-    // 'ok'：正常登录；'unknown'：服务端暂时连不上，但 Key 未必有问题 —— 保留登录态
-    authLost = false;
-    var remembered = store.set('og_admin_key', AK);
+  fetchJson('/api/auth/me', 'GET', undefined, apiHeaders()).then(function(r){
+    ME = r.user || null;
+    if(r.emergency) saveEmergency(AK);
+    else if(TOKEN && !store.set('og_session', TOKEN)) warnNoStorage();
     $('login').classList.remove('on');
-    setConn(auth === 'ok' ? 'ok' : 'fail');
-    if(!remembered) warnNoStorage();
-    if(auth === 'unknown') toast('暂时无法连接服务端，已保留登录状态', 'bad');
+    setConn('ok');
+    applyRole();
     return loadAll().then(function(failed){
       if(failed && failed.length) toast(failed.length + ' 个接口暂时不可用，其余数据已正常显示', 'bad');
     }).catch(function(e){
-      if(!isAuthErr(e)) toast(e.message, 'bad');
+      if(!isSessionErr(e)) toast(e.message, 'bad');
     });
+  }).catch(function(e){
+    if(isSessionErr(e)){
+      clearEmergency();
+      store.del('og_session');
+      TOKEN = ''; ME = null;
+      setConn('fail');
+      var msg = e.message || '登录已失效，请重新登录';
+      if(emergency && (e.code === 'login_required' || e.code === 'session_invalid')) msg = 'ADMIN_KEY 不正确或未配置';
+      showAuth(emergency && e.code !== 'account_disabled' ? 'emergency' : 'login', msg);
+      return;
+    }
+    setConn('fail');
+    showAuth('offline', '暂时无法连接服务端：' + (e.message || '网络异常'));
   });
 }
 
 function refresh(){
-  if(!AK) return;
+  if(!ME) return;
   loadAll().then(function(failed){
     if(failed && failed.length) toast(failed.length + ' 个接口暂时不可用，已显示其余数据', 'bad');
     else toast('已刷新', 'ok');
   }).catch(function(e){
-    // 只有 401/403 走到这里（markLoggedOut 已弹登录页），无需重复提示
-    if(!isAuthErr(e)) toast(e.message, 'bad');
+    // 会话失效会由 markLoggedOut 弹回登录页，无需重复提示
+    if(!isSessionErr(e)) toast(e.message, 'bad');
   });
 }
 
 /* ---------- 导航 ---------- */
 function gotoTab(t){
+  if(!ME) return;
+  var admin = ME.role === 'admin';
+  if(!admin && ADMIN_TABS.indexOf(t) >= 0) t = 'mykeys';
+  if(admin && t === 'mykeys') t = 'overview';
   document.querySelectorAll('.navbtn').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-tab') === t); });
   document.querySelectorAll('.tab').forEach(function(s){ s.classList.remove('on'); });
   var el = $('t-' + t); if(el) el.classList.add('on');
@@ -981,6 +1319,9 @@ function gotoTab(t){
   document.title = meta[0] ? meta[0] + ' · OneAPI Gateway' : 'OneAPI Gateway · 控制台';
   if(t === 'logs'){ if(!$('logDate').value) $('logDate').value = S.serverToday || todayLocal(); loadLogs(true); }
   if(t === 'settings') renderSettings();
+  if(t === 'mykeys') renderMyKeys();
+  if(t === 'accounts') renderAccounts();
+  if(t === 'account') renderAccount();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 document.querySelectorAll('.navbtn').forEach(function(b){
@@ -1466,6 +1807,7 @@ function renderKeys(){
     var expTxt = k.expires_at ? esc(String(k.expires_at).slice(0, 10)) : '<span class="muted">长期</span>';
     if(exp) expTxt = '<span class="bad">' + esc(String(k.expires_at).slice(0, 10)) + '</span>';
     var subs = [];
+    if(k.owner_username) subs.push('用户 ' + esc(k.owner_username));
     if(k.note) subs.push(esc(k.note));
     if(k.allowed_models && k.allowed_models.length && k.allowed_models.indexOf('*') < 0) subs.push('限 ' + esc(k.allowed_models.join('/')));
     if(k.rpm != null) subs.push(k.rpm > 0 ? 'RPM ' + k.rpm : 'RPM 不限');
@@ -1535,10 +1877,11 @@ function saveKey(){
     }
   }).catch(function(e){ toast(e.message, 'bad'); });
 }
-function showCurl(i){
-  var k = S.keys[i];
+function showCurl(i){ showCurlForKey(S.keys[i]); }
+function showCurlForKey(k){
+  if(!k) return;
   var origin = window.location.origin;
-  var kk = k.key || (k.key_prefix + '<完整密钥>');
+  var kk = k.key || ((k.key_prefix || '<密钥>') + '<完整密钥>');
   var cmd = 'curl ' + origin + '/v1/chat/completions \\n' +
     '  -H "Authorization: Bearer ' + kk + '" \\n' +
     '  -H "Content-Type: application/json" \\n' +
@@ -1551,12 +1894,278 @@ function showCurl(i){
     '  },\\n' +
     '  body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "你好" }] })\\n' +
     '});';
-  openModal('<h3>调用示例 · ' + esc(k.name) + '</h3><p class="msub">将示例中的模型名替换为网关支持的模型即可</p>' +
+  openModal('<h3>调用示例 · ' + esc(k.name) + '</h3><p class="msub">将示例中的模型名替换为网关支持的模型即可；' + (k.key ? '' : '完整密钥仅创建当次展示，示例中的前缀需替换为你的完整密钥。') + '</p>' +
     '<div class="fld" style="margin-top:0"><span style="font-size:12.5px;color:var(--text2)">cURL</span><pre class="detail" style="margin-top:6px">' + esc(cmd) + '</pre>' +
     '<div class="row end" style="margin-top:8px"><button class="ghost sm" data-act="copy-text" data-t="' + esc(cmd) + '">复制</button></div></div>' +
     '<div class="fld"><span style="font-size:12.5px;color:var(--text2)">JavaScript (fetch)</span><pre class="detail" style="margin-top:6px">' + esc(js) + '</pre>' +
     '<div class="row end" style="margin-top:8px"><button class="ghost sm" data-act="copy-text" data-t="' + esc(js) + '">复制</button></div></div>' +
     '<div class="row end"><button class="ghost" data-act="close-modal">关闭</button></div>', 'lg');
+}
+
+/* ---------- 普通用户：我的密钥 ---------- */
+function renderMyKeys(){
+  var box = $('myKeyTable');
+  if(!box) return;
+  var a = S.my || {};
+  var quota = Number(a.quota_tokens) || 0;
+  var used = Number(a.used_tokens) || 0;
+  var cost = Number(a.used_cost) || 0;
+  var requests = (S.mykeys || []).reduce(function(sum, k){ return sum + (Number(k.requests) || 0); }, 0);
+  var pct = quota > 0 ? Math.min(100, Math.round(used / quota * 100)) : 0;
+  if($('myStats')){
+    $('myStats').innerHTML =
+      statCard({ icon:I.coin, label:'账号配额', value:quota > 0 ? fmtShort(quota) : '不限', sub:quota > 0 ? '已用 ' + pct + '%' : '管理员未设置账号配额' }) +
+      statCard({ icon:I.bolt, label:'已用 Tokens', value:fmtShort(used), sub:'预估费用 $' + fmtCost(cost) }) +
+      statCard({ icon:I.server, label:'我的密钥', value:String((S.mykeys || []).length), sub:'累计 ' + fmtNum(requests) + ' 次请求 · 上限 20 个' });
+  }
+  $('navMyKey').textContent = (S.mykeys || []).length;
+  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:160px">名称</th><th style="min-width:150px">密钥前缀</th><th class="ar" style="width:150px">已用 Tokens</th><th style="width:108px">创建时间</th><th class="ar" style="width:186px">操作</th></tr></thead><tbody>';
+  if(!(S.mykeys || []).length){
+    h += '<tr><td colspan="6"><div class="empty">' + I.inbox + '<div>还没有密钥，点击右上角「生成密钥」创建</div></div></td></tr>';
+  }
+  (S.mykeys || []).forEach(function(k, i){
+    var subs = [];
+    if(k.expires_at) subs.push('有效期至 ' + esc(String(k.expires_at).slice(0, 10)));
+    if(k.last_used_at) subs.push('最近 ' + esc(fmtTime(k.last_used_at)));
+    h += '<tr>' +
+      '<td><label class="switch"><input type="checkbox" data-act="my-toggle-key" data-i="' + i + '"' + (k.enabled !== false ? ' checked' : '') + '><span></span></label></td>' +
+      '<td><div class="tname"><div><b>' + esc(k.name) + '</b>' + (subs.length ? '<span class="sub">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
+      '<td class="mono nowrap">' + esc((k.key_prefix || '') + '…') + '</td>' +
+      '<td class="ar nowrap">' + fmtNum(k.used_tokens) + '<span class="sub muted">' + fmtNum(k.requests) + ' 次请求 · $' + fmtCost(k.used_cost) + '</span></td>' +
+      '<td class="nowrap">' + (k.created_at ? esc(String(k.created_at).slice(0, 10)) : '-') + '</td>' +
+      '<td><div class="ops r"><button class="ghost sm" data-act="curl-my" data-i="' + i + '">示例</button>' +
+      '<button class="ghost sm" data-act="rename-my" data-i="' + i + '">重命名</button>' +
+      '<button class="soft sm" data-act="del-my-key" data-i="' + i + '">删除</button></div></td></tr>';
+  });
+  box.innerHTML = h + '</tbody></table>';
+}
+function openMyKeyModal(){
+  openModal('<h3>生成密钥</h3><p class="msub">密钥仅在创建当次完整显示，请立即复制保存</p>' +
+    '<div class="grid"><label>名称<input id="mk_name" type="text" maxlength="60" placeholder="如：我的应用"></label></div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-my-key">生成</button></div>');
+}
+function saveMyKey(){
+  var name = ($('mk_name').value || '').trim();
+  api('/api/user/keys', 'POST', { action: 'create', name: name }).then(function(r){
+    openModal('<h3>密钥已生成</h3><p class="msub">请立即复制保存，关闭后将无法再次查看完整密钥</p>' +
+      '<pre class="detail">' + esc(r.key) + '</pre>' +
+      '<div class="row end"><button data-act="copy-text" data-t="' + esc(r.key) + '">复制密钥</button><button class="ghost" data-act="close-modal">关闭</button></div>', 'sm');
+    loadAll().catch(function(e){ toast(e.message, 'bad'); });
+  }).catch(function(e){ toast(e.message, 'bad'); });
+}
+function openRenameMyKey(i){
+  var k = S.mykeys[i];
+  if(!k) return;
+  openModal('<h3>重命名密钥</h3><p class="msub">' + esc(k.key_prefix || '') + '…</p>' +
+    '<div class="grid"><label>名称<input id="mk_rename" type="text" maxlength="60" value="' + esc(k.name) + '"></label></div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="rename-my-key" data-i="' + i + '">保存</button></div>');
+}
+function renameMyKey(i){
+  var k = S.mykeys[i];
+  if(!k) return;
+  var name = ($('mk_rename').value || '').trim();
+  if(!name) return toast('请填写名称', 'bad');
+  api('/api/user/keys', 'POST', { action: 'rename', id: k.id, name: name }).then(function(){
+    closeModal();
+    toast('已重命名', 'ok');
+    return loadAll();
+  }).catch(function(e){ toast(e.message, 'bad'); });
+}
+function delMyKey(i){
+  var k = S.mykeys[i];
+  if(!k) return;
+  confirmDlg('删除密钥', '确定删除密钥「' + k.name + '」？调用方将立即失效。').then(function(ok){
+    if(!ok) return;
+    api('/api/user/keys', 'POST', { action: 'delete', id: k.id }).then(function(){
+      toast('已删除', 'ok');
+      return loadAll();
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
+}
+
+/* ---------- 管理员：账号管理 ---------- */
+function filteredAccounts(){
+  var el = $('acctQ');
+  var q = (el && el.value || '').trim().toLowerCase();
+  return (S.accounts || []).filter(function(a){
+    return !q || String(a.username || '').toLowerCase().indexOf(q) >= 0;
+  });
+}
+function renderAccounts(){
+  var box = $('acctTable');
+  if(!box) return;
+  $('navAcct').textContent = (S.accounts || []).length;
+  var list = filteredAccounts();
+  var h = '<table><thead><tr><th style="width:56px">状态</th><th style="min-width:170px">用户名</th><th style="width:88px">角色</th><th style="width:120px">配额</th><th class="ar" style="width:140px">已用 Tokens</th><th style="width:76px">密钥</th><th style="width:96px">安全问答</th><th class="ar" style="width:212px">操作</th></tr></thead><tbody>';
+  if(!list.length){
+    h += '<tr><td colspan="8"><div class="empty">' + I.inbox + '<div>' + (S.accounts.length ? '没有符合搜索条件的账号' : '暂无账号') + '</div></div></td></tr>';
+  }
+  list.forEach(function(a){
+    var idx = S.accounts.indexOf(a);
+    var subs = [];
+    if(a.is_current) subs.push('当前登录');
+    if(a.last_login_at) subs.push('最近 ' + esc(fmtTime(a.last_login_at)));
+    h += '<tr>' +
+      '<td><label class="switch"><input type="checkbox" data-act="toggle-account" data-id="' + esc(a.id) + '"' + (a.enabled !== false ? ' checked' : '') + (a.is_current ? ' disabled' : '') + '><span></span></label></td>' +
+      '<td><div class="tname"><div><b>' + esc(a.username) + '</b>' + (subs.length ? '<span class="sub">' + subs.join(' · ') + '</span>' : '') + '</div></div></td>' +
+      '<td>' + (a.role === 'admin' ? '<span class="badge info">管理员</span>' : '<span class="badge">普通用户</span>') + '</td>' +
+      '<td class="nowrap">' + (a.quota_tokens > 0 ? fmtNum(a.quota_tokens) : '<span class="muted">不限</span>') + '</td>' +
+      '<td class="ar nowrap">' + fmtNum(a.used_tokens) + '<span class="sub muted">$' + fmtCost(a.used_cost) + '</span></td>' +
+      '<td class="nowrap">' + fmtNum(a.key_count) + '</td>' +
+      '<td>' + (a.has_recovery ? '<span class="badge ok">已设置</span>' : '<span class="muted">未设置</span>') + '</td>' +
+      '<td><div class="ops r"><button class="ghost sm" data-act="edit-account" data-i="' + idx + '">编辑</button>' +
+      '<button class="ghost sm" data-act="reset-account-pw" data-i="' + idx + '">重置密码</button>' +
+      '<button class="soft sm" data-act="del-account" data-i="' + idx + '">删除</button></div></td></tr>';
+  });
+  box.innerHTML = h + '</tbody></table>';
+}
+function openAccountModal(i){
+  editingAccount = i;
+  var isNew = i < 0;
+  var a = isNew
+    ? { role: 'user', enabled: true, quota_tokens: Number(S.settings.default_user_quota_tokens) || 0, has_recovery: false }
+    : S.accounts[i];
+  if(!a) return;
+  var h = '<h3>' + (isNew ? '新建账号' : '编辑账号') + '</h3><p class="msub">' +
+    (isNew ? '创建后把用户名与初始密码交给成员即可使用' : '账号：' + esc(a.username)) + '</p><div class="grid">';
+  if(isNew){
+    h += '<label>用户名<input id="aa_user" type="text" maxlength="24" placeholder="2~24 位中英文、数字、下划线或短横线"></label>' +
+      '<label>初始密码<input id="aa_pass" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>';
+  }
+  h += '<label>角色<select id="aa_role"><option value="user"' + (a.role !== 'admin' ? ' selected' : '') + '>普通用户</option><option value="admin"' + (a.role === 'admin' ? ' selected' : '') + '>管理员</option></select></label>' +
+    '<label>Token 配额（0 = 不限）<input id="aa_quota" type="number" min="0" step="1000" value="' + esc(a.quota_tokens || 0) + '"></label>' +
+    (isNew ? '' : '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="aa_enabled" type="checkbox"' + (a.enabled !== false ? ' checked' : '') + (a.is_current ? ' disabled' : '') + '> 启用该账号</label>') +
+    '<label>安全问题（可选）<input id="aa_q" type="text" maxlength="100" placeholder="留空表示不修改"></label>' +
+    '<label>安全问题答案<input id="aa_a" type="password" maxlength="100" autocomplete="off" placeholder="设置新问题时填写"></label>' +
+    '</div>';
+  if(!isNew && a.has_recovery){
+    h += '<label class="check" style="margin-top:10px"><input id="aa_clear_sec" type="checkbox"> 清除已设置的安全问题</label>';
+  }
+  h += '<p class="hint">普通用户登录后只能管理自己名下的密钥与用量；管理员可管理全部渠道、密钥与设置。</p>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="save-account">' + (isNew ? '创建' : '保存') + '</button></div>';
+  openModal(h);
+}
+function saveAccount(){
+  var isNew = editingAccount < 0;
+  var role = $('aa_role').value === 'admin' ? 'admin' : 'user';
+  var quota = Math.max(0, parseInt($('aa_quota').value, 10) || 0);
+  var q = ($('aa_q').value || '').trim();
+  var ans = $('aa_a').value || '';
+  var payload;
+  if(isNew){
+    var u = ($('aa_user').value || '').trim();
+    var p = $('aa_pass').value;
+    if(!u) return toast('请填写用户名', 'bad');
+    if(p.length < 8) return toast('初始密码至少 8 位', 'bad');
+    payload = { action: 'create', username: u, password: p, role: role, quota_tokens: quota };
+    if(q || ans){ payload.question = q; payload.answer = ans; }
+  } else {
+    var a = S.accounts[editingAccount];
+    payload = { action: 'update', id: a.id, role: role, quota_tokens: quota, enabled: $('aa_enabled').checked };
+    if($('aa_clear_sec') && $('aa_clear_sec').checked) payload.clear_security = true;
+    else if(q || ans){ payload.question = q; payload.answer = ans; }
+  }
+  var btn = $('modalBox').querySelector('[data-act="save-account"]');
+  busyBtn(btn, true, '保存中…');
+  api('/api/admin/accounts', 'POST', payload).then(function(){
+    closeModal();
+    toast(isNew ? '账号已创建' : '账号已更新', 'ok');
+    return loadAll();
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function openResetAccountPw(i){
+  var a = S.accounts[i];
+  if(!a) return;
+  openModal('<h3>重置密码</h3><p class="msub">为「' + esc(a.username) + '」设置新密码，该账号在其他设备上的登录会失效</p>' +
+    '<div class="grid"><label>新密码<input id="rp_new" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+    '<label>确认新密码<input id="rp_new2" type="password" maxlength="128" autocomplete="new-password"></label></div>' +
+    '<div class="row end"><button class="ghost" data-act="close-modal">取消</button><button data-act="reset-account-pw-save" data-i="' + i + '">重置</button></div>');
+}
+function resetAccountPw(i){
+  var a = S.accounts[i];
+  if(!a) return;
+  var p = $('rp_new').value, p2 = $('rp_new2').value;
+  if(p.length < 8) return toast('新密码至少 8 位', 'bad');
+  if(p !== p2) return toast('两次输入的密码不一致', 'bad');
+  var btn = $('modalBox').querySelector('[data-act="reset-account-pw-save"]');
+  busyBtn(btn, true, '重置中…');
+  api('/api/admin/accounts', 'POST', { action: 'reset-password', id: a.id, new_password: p }).then(function(){
+    closeModal();
+    toast('密码已重置', 'ok');
+  }).catch(function(e){
+    busyBtn(btn, false);
+    toast(e.message, 'bad');
+  });
+}
+function delAccount(i){
+  var a = S.accounts[i];
+  if(!a) return;
+  confirmDlg('删除账号', '确定删除账号「' + a.username + '」？其名下 ' + a.key_count + ' 个密钥会一并删除，此操作不可恢复。').then(function(ok){
+    if(!ok) return;
+    api('/api/admin/accounts', 'POST', { action: 'delete', id: a.id }).then(function(r){
+      toast('账号已删除' + (r.removed_keys ? '，同时删除 ' + r.removed_keys + ' 个密钥' : ''), 'ok');
+      return loadAll();
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
+}
+
+/* ---------- 我的账号 ---------- */
+function renderAccount(){
+  var box = $('acctInfo');
+  if(!box) return;
+  if(!ME){ box.innerHTML = ''; return; }
+  var cur = (S.accounts || []).filter(function(a){ return a.is_current; })[0] || null;
+  var used = S.my ? (S.my.used_tokens || 0) : (cur ? (cur.used_tokens || 0) : 0);
+  var rows = [
+    ['用户名', esc(ME.username)],
+    ['角色', ME.role === 'admin' ? '管理员' : '普通用户'],
+    ['账号配额', ME.quota_tokens > 0 ? fmtNum(ME.quota_tokens) + ' Tokens' : '不限'],
+    ['已用 Tokens', fmtNum(used)],
+    ['最近登录', fmtTime(ME.last_login_at)],
+    ['创建时间', fmtTime(ME.created_at)],
+    ['安全问题', ME.has_recovery ? '已设置' : '未设置']
+  ];
+  var h = rows.map(function(r){ return '<div class="kv"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('');
+  if(ME.emergency) h += '<div class="login-warn">当前为 ADMIN_KEY 应急登录：没有关联账号，无法修改密码或安全问题。日常请使用账号登录。</div>';
+  box.innerHTML = h;
+  var disabled = !!ME.emergency;
+  ['ac_old','ac_new','ac_new2','ac_q','ac_a','ac_pw'].forEach(function(id){
+    var el = $(id); if(el) el.disabled = disabled;
+  });
+  document.querySelectorAll('#t-account button[data-act]').forEach(function(el){ el.disabled = disabled; });
+  var hint = $('acSecHint');
+  if(hint){
+    hint.textContent = disabled
+      ? '应急登录无法设置安全问题。'
+      : (ME.has_recovery ? '已设置安全问题；重新填写可覆盖旧问题与答案。' : '尚未设置安全问题，忘记密码时无法自助找回。');
+  }
+}
+function changePassword(){
+  var oldP = $('ac_old').value, p = $('ac_new').value, p2 = $('ac_new2').value;
+  if(!oldP) return toast('请填写当前密码', 'bad');
+  if(p.length < 8) return toast('新密码至少 8 位', 'bad');
+  if(p !== p2) return toast('两次输入的新密码不一致', 'bad');
+  api('/api/auth/change-password', 'POST', { old_password: oldP, new_password: p }).then(function(){
+    $('ac_old').value = ''; $('ac_new').value = ''; $('ac_new2').value = '';
+    toast('密码已修改，其他设备已登出', 'ok');
+  }).catch(function(e){ toast(e.message, 'bad'); });
+}
+function saveSecurity(){
+  var q = ($('ac_q').value || '').trim();
+  var a = $('ac_a').value || '';
+  var p = $('ac_pw').value || '';
+  if(!q) return toast('请填写安全问题', 'bad');
+  if(!a) return toast('请填写安全问题答案', 'bad');
+  if(!p) return toast('请输入当前密码以验证身份', 'bad');
+  api('/api/auth/security', 'POST', { question: q, answer: a, password: p }).then(function(){
+    ME.has_recovery = true;
+    $('ac_q').value = ''; $('ac_a').value = ''; $('ac_pw').value = '';
+    renderAccount();
+    toast('安全问题已保存', 'ok');
+  }).catch(function(e){ toast(e.message, 'bad'); });
 }
 function exportConfig(){
   var blob = new Blob([JSON.stringify({ channels: S.channels, keys: S.keys, settings: S.settings }, null, 2)], { type: 'application/json' });
@@ -1690,6 +2299,9 @@ function exportLogs(){
 function renderSettings(){
   var s = S.settings || {};
   $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
+  $('s_allow_reg').checked = s.allow_registration === true;
+  $('s_allow_recovery').checked = s.allow_password_recovery !== false;
+  $('s_default_user_quota').value = s.default_user_quota_tokens == null ? 0 : s.default_user_quota_tokens;
   $('s_timeout').value = s.request_timeout_ms || 180000;
   $('s_stream_idle').value = s.stream_idle_timeout_ms || 180000;
   $('s_firstbyte').value = s.stream_first_byte_ms === 0 ? 0 : s.stream_first_byte_ms || 300000;
@@ -1741,6 +2353,9 @@ function collectSettings(){
   if(!Number.isFinite(tz)) tz = 480;
   return {
     allow_admin_key_as_api_key: $('s_allow_admin').checked,
+    allow_registration: $('s_allow_reg').checked,
+    allow_password_recovery: $('s_allow_recovery').checked,
+    default_user_quota_tokens: Math.max(0, parseInt($('s_default_user_quota').value, 10) || 0),
     request_timeout_ms: parseInt($('s_timeout').value, 10) || 180000,
     stream_idle_timeout_ms: parseInt($('s_stream_idle').value, 10) || 180000,
     stream_first_byte_ms: (() => {
@@ -1782,6 +2397,8 @@ function saveSettings(btn){
   btn.disabled = true; var old = btn.textContent; btn.textContent = '保存中…';
   api('/api/admin/settings', 'POST', collectSettings()).then(function(r){
     S.settings = r.settings || S.settings;
+    AUTH.allow_registration = S.settings.allow_registration === true;
+    AUTH.allow_password_recovery = S.settings.allow_password_recovery !== false;
     renderSettings();
     toast('设置已保存', 'ok');
   }).catch(function(e){ toast(e.message, 'bad'); })
@@ -1817,19 +2434,42 @@ function renderBackups(){
     var h = '<div class="bhead"><span>日期</span><span>大小</span><span></span></div>';
     list.forEach(function(b){
       h += '<div class="brow"><span>' + esc(b.date) + '</span><span class="muted">' + fmtBytes(b.size) + '</span>' +
-        '<span><a class="mini-link" href="/api/admin/backups?date=' + esc(b.date) + '" download>下载</a></span></div>';
+        '<span><button class="ghost sm" data-act="backup-download" data-d="' + esc(b.date) + '">下载</button></span></div>';
     });
     el.innerHTML = h + '<div class="hint" style="margin-top:8px">自动备份每天首个请求触发一次，当前保留 ' + (r.keep_days || 7) + ' 份；「立即导出」生成的是当前时刻的完整快照。</div>';
   }).catch(function(e){
     el.textContent = '备份列表加载失败：' + e.message;
   });
 }
+function downloadWithAuth(url, filename){
+  return fetch(url, { headers: apiHeaders() }).then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){ return {}; }).then(function(d){
+        throw new Error((d.error && d.error.message) || ('HTTP ' + r.status));
+      });
+    }
+    return r.blob();
+  }).then(function(blob){
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || '';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 800);
+  });
+}
 function exportBackup(btn){
-  var a = document.createElement('a');
-  a.href = '/api/admin/backup';
-  a.download = '';
-  document.body.appendChild(a); a.click(); a.remove();
-  toast('备份快照已开始下载', 'ok');
+  if(btn) btn.disabled = true;
+  downloadWithAuth('/api/admin/backup', 'oneapi-backup-' + (S.serverToday || todayLocal()) + '.json')
+    .then(function(){ toast('备份快照已下载', 'ok'); })
+    .catch(function(e){ toast('导出失败：' + e.message, 'bad'); })
+    .then(function(){ if(btn) btn.disabled = false; });
+}
+function downloadBackupDate(date, btn){
+  if(btn) btn.disabled = true;
+  downloadWithAuth('/api/admin/backups?date=' + encodeURIComponent(date), 'oneapi-backup-' + date + '.json')
+    .then(function(){ toast('备份已下载', 'ok'); })
+    .catch(function(e){ toast('下载失败：' + e.message, 'bad'); })
+    .then(function(){ if(btn) btn.disabled = false; });
 }
 function testNotify(btn){
   var payload = {
@@ -1864,13 +2504,14 @@ function bindRestoreFile(){
         toast('不是有效的网关备份文件（需要「立即导出」生成的完整快照）', 'bad'); return;
       }
       var when = snap.created_at ? String(snap.created_at).replace('T',' ').slice(0,19) + ' UTC' : '未知时间';
+      var acctTxt = Array.isArray(snap.accounts) ? '、账号（' + snap.accounts.length + ' 个，所有登录会话会失效）' : '';
       confirmDlg('确认恢复备份',
-        '将用 ' + esc(when) + ' 的备份整体覆盖当前的渠道（' + snap.channels.length + ' 个）、密钥（' + snap.keys.length + ' 个）与设置，且不可撤销。确定继续？'
+        '将用 ' + esc(when) + ' 的备份整体覆盖当前的渠道（' + snap.channels.length + ' 个）、密钥（' + snap.keys.length + ' 个）' + acctTxt + '与设置，且不可撤销。确定继续？'
       ).then(function(ok){
         if(!ok) return;
         snap.confirm = true;
         api('/api/admin/restore', 'POST', snap).then(function(r){
-          toast('已恢复 ' + r.channels + ' 个渠道 / ' + r.keys + ' 个密钥，页面即将刷新', 'ok');
+          toast('已恢复 ' + r.channels + ' 个渠道 / ' + r.keys + ' 个密钥' + (r.accounts != null ? ' / ' + r.accounts + ' 个账号' : '') + '，页面即将刷新', 'ok');
           setTimeout(function(){ location.reload(); }, 1200);
         }).catch(function(e){ toast(e.message, 'bad'); });
       });
@@ -1881,12 +2522,20 @@ function bindRestoreFile(){
 
 /* ---------- 渲染总入口 ---------- */
 function renderAll(){
+  if(!ME) return;
+  if(ME.role !== 'admin'){
+    renderMyKeys();
+    renderAccount();
+    return;
+  }
   renderStats();
   renderTrend();
   renderOverview();
   renderChannels();
   renderKeys();
-  if($('t-settings').classList.contains('on')) renderSettings();
+  renderAccounts();
+  renderAccount();
+  if($('t-settings') && $('t-settings').classList.contains('on')) renderSettings();
 }
 
 /* ---------- 全局事件 ---------- */
@@ -1912,7 +2561,15 @@ document.addEventListener('click', function(e){
   var act = el.getAttribute('data-act');
   var i = parseInt(el.getAttribute('data-i'), 10);
 
-  if(act === 'close-modal') closeModal();
+  if(act === 'auth-mode') showAuth(el.getAttribute('data-mode'));
+  else if(act === 'auth-setup') setupAdmin();
+  else if(act === 'auth-login') loginSubmit();
+  else if(act === 'auth-register') registerSubmit();
+  else if(act === 'auth-lookup') recoveryLookup();
+  else if(act === 'auth-recover') recoveryReset();
+  else if(act === 'auth-emergency') emergencyLogin();
+  else if(act === 'auth-retry') bootAuth();
+  else if(act === 'close-modal') closeModal();
   else if(act === 'cf-yes'){ /* 由 confirmDlg 绑定 */ }
   else if(act === 'logout') doLogout();
   else if(act === 'refresh-stats'){
@@ -1959,6 +2616,20 @@ document.addEventListener('click', function(e){
     copyText(el.getAttribute('data-t'));
   }
   else if(act === 'curl-key') showCurl(i);
+  else if(act === 'my-add-key') openMyKeyModal();
+  else if(act === 'save-my-key') saveMyKey();
+  else if(act === 'curl-my') showCurlForKey(S.mykeys[i]);
+  else if(act === 'rename-my') openRenameMyKey(i);
+  else if(act === 'rename-my-key') renameMyKey(i);
+  else if(act === 'del-my-key') delMyKey(i);
+  else if(act === 'add-account') openAccountModal(-1);
+  else if(act === 'edit-account') openAccountModal(i);
+  else if(act === 'save-account') saveAccount();
+  else if(act === 'reset-account-pw') openResetAccountPw(i);
+  else if(act === 'reset-account-pw-save') resetAccountPw(i);
+  else if(act === 'del-account') delAccount(i);
+  else if(act === 'change-password') changePassword();
+  else if(act === 'save-security') saveSecurity();
   else if(act === 'log-prev'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), -1); loadLogs(); }
   else if(act === 'log-next'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), 1); loadLogs(); }
   else if(act === 'log-today'){ $('logDate').value = S.serverToday || todayLocal(); loadLogs(); }
@@ -1999,6 +2670,7 @@ document.addEventListener('click', function(e){
   else if(act === 'price-del') el.closest('.prow').remove();
   else if(act === 'cleanup-logs') cleanupLogs(el);
   else if(act === 'backup-export') exportBackup(el);
+  else if(act === 'backup-download') downloadBackupDate(el.getAttribute('data-d'), el);
   else if(act === 'test-notify') testNotify(el);
   else if(act === 'backup-restore'){ bindRestoreFile(); var rf = $('restoreFile'); if(rf) rf.click(); }
 });
@@ -2026,6 +2698,19 @@ document.addEventListener('change', function(e){
     var j = parseInt(el.getAttribute('data-i'), 10);
     S.keys[j].enabled = el.checked;
     saveKeys().then(function(){ renderOverview(); }).catch(function(er){ toast(er.message, 'bad'); el.checked = !el.checked; });
+  } else if(act === 'my-toggle-key'){
+    var jk = parseInt(el.getAttribute('data-i'), 10);
+    var mk = S.mykeys[jk];
+    if(!mk) return;
+    api('/api/user/keys', 'POST', { action: 'toggle', id: mk.id, enabled: el.checked }).then(function(){
+      mk.enabled = el.checked;
+      toast(el.checked ? '密钥已启用' : '密钥已禁用', 'ok');
+    }).catch(function(er){ toast(er.message, 'bad'); el.checked = !el.checked; });
+  } else if(act === 'toggle-account'){
+    api('/api/admin/accounts', 'POST', { action: 'update', id: el.getAttribute('data-id'), enabled: el.checked }).then(function(){
+      toast(el.checked ? '账号已启用' : '账号已禁用', 'ok');
+      return loadAll();
+    }).catch(function(er){ toast(er.message, 'bad'); el.checked = !el.checked; });
   } else if(el.id === 'fileImport' && el.files && el.files[0]){
     importConfig(el.files[0]); el.value = '';
   } else if(el.id === 'logAuto'){
@@ -2051,6 +2736,7 @@ document.addEventListener('input', function(e){
   var el = $(id);
   el.addEventListener(id === 'keyQ' ? 'input' : 'change', function(){ renderKeys(); });
 });
+if($('acctQ')) $('acctQ').addEventListener('input', renderAccounts);
 ['logModel','logQ'].forEach(function(id){
   $(id).addEventListener('keydown', function(e){ if(e.key === 'Enter') loadLogs(); });
 });
@@ -2058,7 +2744,6 @@ document.addEventListener('input', function(e){
 /* ---------- 初始化 ---------- */
 (function init(){
   initTheme();
-  $('ak').value = AK;
   // 日志日期不在这里写死：连接成功后由 loadAll() 用服务端（按设置的时区偏移）
   // 算出的「今天」填充，避免浏览器时区与 Worker 的 UTC 时区不一致
   $('logDate').value = '';
@@ -2068,11 +2753,16 @@ document.addEventListener('input', function(e){
     applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
     if(S.stats) renderTrend();
   });
-  $('btnLogin').addEventListener('click', function(){ AK = $('ak').value.trim(); connect(false); });
-  $('ak').addEventListener('keydown', function(e){ if(e.key === 'Enter') $('btnLogin').click(); });
+  $('authBox').addEventListener('keydown', function(e){
+    if(e.key !== 'Enter') return;
+    var map = { setup:'auth-setup', login:'auth-login', register:'auth-register', recover:'auth-lookup', recover2:'auth-recover', emergency:'auth-emergency' };
+    var act = map[authMode];
+    if(!act) return;
+    var btn = $('authBox').querySelector('[data-act="' + act + '"]');
+    if(btn){ e.preventDefault(); btn.click(); }
+  });
   $('btnRefresh').addEventListener('click', refresh);
-  if(AK) connect(true);
-  else { setConn('off'); $('login').classList.add('on'); }
+  bootAuth();
 })();
 </script>
 </body>

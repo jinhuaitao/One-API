@@ -38,10 +38,12 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
+const ACCOUNTS_KEY = 'data/accounts.json';
+const SESSIONS_KEY = 'data/sessions.json';
 const STATS_PREFIX = 'data/stats/';
 const LOG_PREFIX = 'logs/';
 /** 13 位时间戳上限，用于生成「越大越新」的倒序 key */
@@ -67,6 +69,12 @@ const json = (data, status = 200, extra = {}) =>
 
 const err = (message, status = 400, code = 'error') =>
   json({ error: { message, code } }, status);
+
+/** 读取 JSON 请求体：解析失败或不是对象都返回 null，由调用方给 400 */
+async function readJsonBody(request) {
+  const body = await request.json().catch(() => null);
+  return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
@@ -296,6 +304,18 @@ function defaultSettings() {
      * 0 = 关闭定时巡检（每日日志清理与备份兜底不受影响）。
      */
     patrol_interval_min: 30,
+    /**
+     * 是否允许自助注册普通账号。默认关闭：网关一旦暴露在公网，
+     * 开放注册就等于开放资源，由管理员在「网关设置 → 账号与安全」里按需打开。
+     */
+    allow_registration: false,
+    /** 是否允许通过「安全问题」自助找回密码（账号未设置问题时不可用） */
+    allow_password_recovery: true,
+    /**
+     * 自助注册的新账号默认可用的 Token 配额（跨该账号所有密钥累计）。
+     * 0 = 不限；管理员可对单个账号单独调整。
+     */
+    default_user_quota_tokens: 0,
   };
 }
 
@@ -360,6 +380,15 @@ function normalizeSettings(raw) {
   s.tg_chat_id = String(s.tg_chat_id || '').trim();
   s.tg_notify_down = s.tg_notify_down !== false;
   s.tg_notify_up = s.tg_notify_up === true;
+  // 账号与安全
+  s.allow_registration = s.allow_registration === true;
+  s.allow_password_recovery = s.allow_password_recovery !== false;
+  s.default_user_quota_tokens = clampInt(
+    s.default_user_quota_tokens,
+    0,
+    1e12,
+    0
+  );
   const normP = (p) => ({ in: clampNum(p && p.in, 0, 1e6, 0), out: clampNum(p && p.out, 0, 1e6, 0) });
   s.default_pricing = normP(s.default_pricing);
   const pricing = {};
@@ -436,15 +465,19 @@ async function ensureSeed(env) {
   if (seeded) return;
   try {
     // 三个检查彼此独立，并行发起，避免串行等待
-    const [ch, ks, st] = await Promise.all([
+    const [ch, ks, st, ac, se] = await Promise.all([
       env.R2.get(CHANNELS_KEY),
       env.R2.get(KEYS_KEY),
       env.R2.get(SETTINGS_KEY),
+      env.R2.get(ACCOUNTS_KEY),
+      env.R2.get(SESSIONS_KEY),
     ]);
     const writes = [];
     if (!ch) writes.push(r2PutJson(env, CHANNELS_KEY, defaultChannels()));
     if (!ks) writes.push(r2PutJson(env, KEYS_KEY, []));
     if (!st) writes.push(r2PutJson(env, SETTINGS_KEY, defaultSettings()));
+    if (!ac) writes.push(r2PutJson(env, ACCOUNTS_KEY, []));
+    if (!se) writes.push(r2PutJson(env, SESSIONS_KEY, []));
     if (writes.length) await Promise.all(writes);
     seeded = true;
   } catch {
@@ -520,6 +553,27 @@ async function authApiKey(env, request, settings) {
   if (rec.enabled === false) {
     return { ok: false, res: err('该 API Key 已被禁用', 401, 'key_disabled') };
   }
+  // 普通用户自助创建的密钥：账号被禁用 / 账号级配额用尽时一并失效。
+  // 账号数据走 5s 短缓存；控制台改账号会主动失效，生效延迟最多 5 秒。
+  if (rec.owner_id) {
+    const accounts = await cachedJson(env, ACCOUNTS_KEY, [], ACCOUNTS_TTL_MS);
+    const owner = (accounts || []).find((a) => a.id === rec.owner_id);
+    if (!owner || owner.enabled === false) {
+      return { ok: false, res: err('该密钥所属账号已被禁用', 403, 'owner_disabled') };
+    }
+    const accountQuota = Number(owner.quota_tokens) || 0;
+    if (accountQuota > 0) {
+      const used = keys
+        .filter((k) => k.owner_id === rec.owner_id)
+        .reduce((sum, k) => sum + (Number(k.used_tokens) || 0), 0);
+      if (used >= accountQuota) {
+        return {
+          ok: false,
+          res: err('该账号的 Token 配额已用完', 429, 'account_quota_exceeded'),
+        };
+      }
+    }
+  }
   if (rec.expires_at && Date.now() > Date.parse(rec.expires_at)) {
     return { ok: false, res: err('该 API Key 已过期', 401, 'key_expired') };
   }
@@ -569,24 +623,320 @@ async function hashKeyRecords(list) {
   return list || [];
 }
 
-async function requireAdmin(env, request) {
+/* ---------------- 账号 / 会话 ----------------
+ *
+ * 账号存放在 data/accounts.json，会话存放在 data/sessions.json（只存 token 的
+ * SHA-256，R2 泄露时不能直接拿来登录）。密码与安全问题答案都用 PBKDF2-SHA256
+ * + 随机盐存储，从不落明文。
+ *
+ * 角色：
+ *  - admin：完整控制台（渠道 / 全部密钥 / 日志 / 设置 / 账号管理）
+ *  - user ：只能登录「我的密钥」，创建和管理自己名下的网关密钥
+ *
+ * 首次部署（accounts 为空）时由 /api/auth/setup 创建第一个管理员；
+ * 环境变量 ADMIN_KEY 仍作为应急凭据：带上 X-Admin-Key 即可绕过账号体系访问
+ * 管理接口，用于忘记密码 / 账号被锁时的自救。
+ */
+
+const SESSION_TTL_MS = 7 * 86400000;
+/**
+ * PBKDF2 迭代次数。Workers 免费版单请求 CPU 上限 10ms，10 万次迭代会直接越线
+ * 被 1102 强杀；1 万次在本机约 6ms，配合 8 位以上密码与登录限流足够。
+ * 记录里保存 iterations，未来调整不影响老账号校验。
+ */
+const PBKDF2_ITERATIONS = 10000;
+const MAX_ACCOUNTS = 500;
+const MAX_KEYS_PER_USER = 20;
+const ACCOUNTS_TTL_MS = 5000;
+
+/** 账号不存在时也跑一次哈希，避免用响应耗时枚举用户名 */
+const DUMMY_SECRET = {
+  algo: 'pbkdf2-sha256',
+  iterations: PBKDF2_ITERATIONS,
+  salt: '00000000000000000000000000000000',
+  hash: '0000000000000000000000000000000000000000000000000000000000000000',
+};
+
+function randomHex(nBytes) {
+  const a = new Uint8Array(nBytes);
+  crypto.getRandomValues(a);
+  return Array.prototype.map
+    .call(a, (b) => ('0' + b.toString(16)).slice(-2))
+    .join('');
+}
+
+function hexToBytes(hex) {
+  const s = String(hex || '');
+  const out = new Uint8Array(Math.floor(s.length / 2));
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16) || 0;
+  }
+  return out;
+}
+
+/** 定长字节比较：哈希比对不应因前缀匹配长度不同而提前返回 */
+function bytesEqual(a, b) {
+  const x = a instanceof Uint8Array ? a : hexToBytes(a);
+  const y = b instanceof Uint8Array ? b : hexToBytes(b);
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+async function pbkdf2Hex(password, saltHex, iterations) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(String(password)),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: hexToBytes(saltHex),
+      iterations: iterations | 0 || PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
+    key,
+    256
+  );
+  return Array.prototype.map
+    .call(new Uint8Array(bits), (b) => ('0' + b.toString(16)).slice(-2))
+    .join('');
+}
+
+async function makeSecret(value) {
+  const salt = randomHex(16);
+  return {
+    algo: 'pbkdf2-sha256',
+    iterations: PBKDF2_ITERATIONS,
+    salt,
+    hash: await pbkdf2Hex(value, salt, PBKDF2_ITERATIONS),
+  };
+}
+
+async function verifySecret(value, rec) {
+  if (!rec || !rec.salt || !rec.hash) return false;
+  const hash = await pbkdf2Hex(value, rec.salt, rec.iterations);
+  return bytesEqual(hash, rec.hash);
+}
+
+/** 安全问题答案归一化：去首尾空白、统一小写、忽略所有空白，减少「看起来一样却不对」 */
+const normalizeAnswer = (s) =>
+  String(s == null ? '' : s)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+
+const validUsername = (u) => /^[A-Za-z0-9_\u4e00-\u9fa5-]{2,24}$/.test(u);
+const validPassword = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
+const validQuestion = (q) => typeof q === 'string' && q.trim().length >= 2 && q.trim().length <= 100;
+const validAnswer = (a) => {
+  const n = normalizeAnswer(a);
+  return n.length >= 1 && n.length <= 100;
+};
+
+function publicAccount(a) {
+  return {
+    id: a.id,
+    username: a.username,
+    role: a.role === 'admin' ? 'admin' : 'user',
+    enabled: a.enabled !== false,
+    created_at: a.created_at || '',
+    last_login_at: a.last_login_at || '',
+    has_recovery: !!(a.security && a.security.hash),
+    quota_tokens: a.quota_tokens || 0,
+  };
+}
+
+function enabledAdminCount(list) {
+  return (list || []).filter((a) => a.role === 'admin' && a.enabled !== false).length;
+}
+
+async function loadAccounts(env) {
+  const list = await r2GetJson(env, ACCOUNTS_KEY, []);
+  return Array.isArray(list) ? list : [];
+}
+
+async function buildAccount(input, role) {
+  const username = String(input.username || '').trim();
+  const now = nowIso();
+  const security =
+    input.question && input.answer
+      ? {
+          question: String(input.question).trim(),
+          ...(await makeSecret(normalizeAnswer(input.answer))),
+        }
+      : null;
+  return {
+    id: 'usr_' + Date.now().toString(36) + rand(4),
+    username,
+    username_lower: username.toLowerCase(),
+    role: role === 'admin' ? 'admin' : 'user',
+    enabled: true,
+    password: await makeSecret(input.password),
+    security,
+    quota_tokens: clampInt(input.quota_tokens, 0, 1e12, 0),
+    created_at: now,
+    updated_at: now,
+    last_login_at: '',
+  };
+}
+
+function publicKeyView(k) {
+  return {
+    id: k.id || '',
+    name: k.name || '',
+    key_prefix: k.key_prefix || '',
+    enabled: k.enabled !== false,
+    quota_tokens: k.quota_tokens || 0,
+    used_tokens: k.used_tokens || 0,
+    requests: k.requests || 0,
+    used_cost: k.used_cost || 0,
+    rpm: k.rpm == null ? null : k.rpm,
+    allowed_models: Array.isArray(k.allowed_models) ? k.allowed_models : [],
+    expires_at: k.expires_at || '',
+    note: k.note || '',
+    created_at: k.created_at || '',
+    last_used_at: k.last_used_at || '',
+  };
+}
+
+/* ---- 登录 / 注册 / 找回 的简易限流（isolate 级，防在线撞库） ---- */
+
+const authThrottle = new Map();
+
+function clientIp(request) {
+  return (
+    request.headers.get('CF-Connecting-IP') ||
+    String(request.headers.get('X-Forwarded-For') || '')
+      .split(',')[0]
+      .trim() ||
+    'local'
+  );
+}
+
+/** 固定窗口计数：超过 max 次返回 false。只用内存，重启 isolate 即清零，够用。 */
+function throttleHit(kind, id, max, windowMs) {
+  const key = kind + ':' + id;
+  const now = Date.now();
+  let b = authThrottle.get(key);
+  if (!b || now - b.at >= windowMs) {
+    b = { at: now, n: 0 };
+    authThrottle.set(key, b);
+  }
+  b.n++;
+  if (authThrottle.size > 5000) {
+    const stale = Array.from(authThrottle.entries())
+      .sort((a, b2) => a[1].at - b2[1].at)
+      .slice(0, Math.ceil(authThrottle.size / 2));
+    for (const [k] of stale) authThrottle.delete(k);
+  }
+  return b.n <= max;
+}
+
+/* ---- 会话 ---- */
+
+async function createSession(env, account) {
+  const token = randomHex(32);
+  const now = Date.now();
+  const rec = {
+    token_hash: await sha256Hex(token),
+    user_id: account.id,
+    created_at: new Date(now).toISOString(),
+    expires_at: new Date(now + SESSION_TTL_MS).toISOString(),
+  };
+  await withLock(SESSIONS_KEY, async () => {
+    const list = (await r2GetJson(env, SESSIONS_KEY, [])) || [];
+    const alive = list
+      .filter((s) => s && s.expires_at && Date.parse(s.expires_at) > now)
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+      .slice(-400);
+    alive.push(rec);
+    await r2PutJson(env, SESSIONS_KEY, alive);
+  });
+  return { token, expires_at: rec.expires_at };
+}
+
+async function revokeSessions(env, userId, exceptHash) {
+  await withLock(SESSIONS_KEY, async () => {
+    const list = (await r2GetJson(env, SESSIONS_KEY, [])) || [];
+    const now = Date.now();
+    const keep = list.filter((s) => {
+      if (!s || (s.expires_at && Date.parse(s.expires_at) <= now)) return false;
+      if (userId && s.user_id === userId && s.token_hash !== exceptHash) return false;
+      if (!userId && s.token_hash === exceptHash) return false;
+      return true;
+    });
+    await r2PutJson(env, SESSIONS_KEY, keep);
+  });
+}
+
+/** 解析请求身份：账号会话优先，ADMIN_KEY 作为应急凭据兜底 */
+async function authenticate(env, request) {
   const url = new URL(request.url);
-  const key =
-    request.headers.get('X-Admin-Key') || url.searchParams.get('admin_key');
-  if (!env.ADMIN_KEY) {
+  const adminKey =
+    request.headers.get('X-Admin-Key') || url.searchParams.get('admin_key') || '';
+  if (env.ADMIN_KEY && adminKey && (await safeEqual(adminKey, env.ADMIN_KEY))) {
     return {
-      ok: false,
-      res: err(
-        '尚未设置 ADMIN_KEY，请在 Cloudflare 控制台将其添加为 Secret 后重试',
-        500,
-        'admin_key_missing'
-      ),
+      ok: true,
+      emergency: true,
+      role: 'admin',
+      account: null,
+      tokenHash: '',
+      user: {
+        id: 'admin_key',
+        username: 'ADMIN_KEY（应急）',
+        role: 'admin',
+        enabled: true,
+        emergency: true,
+        has_recovery: false,
+        quota_tokens: 0,
+      },
     };
   }
-  if (!key || !(await safeEqual(key, env.ADMIN_KEY))) {
-    return { ok: false, res: err('Admin Key 不正确', 401, 'unauthorized') };
+
+  const token = request.headers.get('X-Session-Token') || '';
+  if (!token) {
+    return { ok: false, res: err('请先登录后再访问', 401, 'login_required') };
   }
-  return { ok: true };
+  const tokenHash = await sha256Hex(token);
+  const sessions = (await r2GetJson(env, SESSIONS_KEY, [])) || [];
+  const session = sessions.find((s) => s && s.token_hash === tokenHash);
+  if (!session) {
+    return { ok: false, res: err('登录状态已失效，请重新登录', 401, 'session_invalid') };
+  }
+  if (session.expires_at && Date.parse(session.expires_at) <= Date.now()) {
+    return { ok: false, res: err('登录已过期，请重新登录', 401, 'session_expired') };
+  }
+  const accounts = await loadAccounts(env);
+  const acc = accounts.find((a) => a.id === session.user_id);
+  if (!acc) {
+    return { ok: false, res: err('账号不存在，请重新登录', 401, 'account_missing') };
+  }
+  if (acc.enabled === false) {
+    return { ok: false, res: err('该账号已被禁用，请联系管理员', 403, 'account_disabled') };
+  }
+  return {
+    ok: true,
+    emergency: false,
+    role: acc.role === 'admin' ? 'admin' : 'user',
+    account: acc,
+    tokenHash,
+    user: publicAccount(acc),
+  };
+}
+
+/** 管理接口鉴权：需要 admin 角色（账号管理员或应急 ADMIN_KEY） */
+async function requireAdmin(env, request) {
+  const auth = await authenticate(env, request);
+  if (!auth.ok) return auth;
+  if (auth.role !== 'admin') {
+    return { ok: false, res: err('需要管理员权限', 403, 'forbidden') };
+  }
+  return auth;
 }
 
 /* ---------------- 渠道路由 ---------------- */
@@ -2535,18 +2885,21 @@ async function maybeAutoBackup(env, ctx, settings) {
     const today = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     if (today === lastBackupDate) return;
     lastBackupDate = today; // 先记日期再备份：备份失败明天重试，避免每个请求都重试
-    const [channels, keys, settingsSnap] = await Promise.all([
+    const [channels, keys, settingsSnap, accounts] = await Promise.all([
       r2GetJson(env, CHANNELS_KEY, []),
       r2GetJson(env, KEYS_KEY, []),
       r2GetJson(env, SETTINGS_KEY, {}),
+      r2GetJson(env, ACCOUNTS_KEY, []),
     ]);
     const snap = {
       type: 'oneapi-gateway-backup',
-      version: 1,
+      version: 2,
       created_at: nowIso(),
       channels,
       keys,
       settings: settingsSnap,
+      // 账号快照含密码/密保答案的哈希（不可逆），用于灾备恢复登录能力
+      accounts,
     };
     await r2PutJson(env, `backup/${today}.json`, snap);
     // 清理超期份数（YYYY-MM-DD 字典序即时间序）
@@ -2608,6 +2961,402 @@ async function saveChannelHealth(env, channelId, health, { settings, ctx } = {})
   }
 }
 
+/* ---------------- 账号相关接口（登录 / 注册 / 找回） ---------------- */
+
+async function handleAuth(env, ctx, request) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const settings = await loadSettings(env);
+  const ip = clientIp(request);
+
+  /* 公开状态：控制台据此决定显示「初始化管理员 / 登录 / 注册 / 找回」 */
+  if (path === '/api/auth/state' && request.method === 'GET') {
+    const accounts = await loadAccounts(env);
+    return json({
+      initialized: accounts.length > 0,
+      allow_registration: settings.allow_registration === true,
+      allow_password_recovery: settings.allow_password_recovery !== false,
+      admin_key_configured: !!env.ADMIN_KEY,
+      version: env.APP_VERSION || VERSION,
+    });
+  }
+
+  /* 首次初始化管理员账号：只在 accounts 为空时可用 */
+  if (path === '/api/auth/setup' && request.method === 'POST') {
+    if (!throttleHit('setup', ip, 6, 3600000)) {
+      return err('尝试过于频繁，请稍后再试', 429, 'too_many_attempts');
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== 'object') {
+      return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    }
+    const username = String(body.username || '').trim();
+    if (!validUsername(username)) {
+      return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
+    }
+    if (!validPassword(body.password)) {
+      return err('密码长度需为 8~128 位', 400, 'bad_password');
+    }
+    if (!validQuestion(body.question)) {
+      return err('请填写安全问题（2~100 字）', 400, 'bad_question');
+    }
+    if (!validAnswer(body.answer)) {
+      return err('请填写安全问题答案（1~100 字）', 400, 'bad_answer');
+    }
+    const account = await buildAccount({ ...body, username }, 'admin');
+    let conflict = false;
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      if (list.length) {
+        conflict = true;
+        return;
+      }
+      list.push(account);
+      await r2PutJson(env, ACCOUNTS_KEY, list);
+    });
+    if (conflict) {
+      return err('管理员账号已初始化，请直接登录', 409, 'already_initialized');
+    }
+    invalidateCache(ACCOUNTS_KEY);
+    const session = await createSession(env, account);
+    return json({
+      ok: true,
+      token: session.token,
+      expires_at: session.expires_at,
+      user: publicAccount(account),
+    });
+  }
+
+  /* 登录 */
+  if (path === '/api/auth/login' && request.method === 'POST') {
+    const body = await readJsonBody(request);
+    const username = String((body && body.username) || '').trim();
+    const lower = username.toLowerCase();
+    if (!throttleHit('login', ip + '|' + lower, 10, 600000)) {
+      return err('登录尝试过于频繁，请 10 分钟后再试', 429, 'too_many_attempts');
+    }
+    const accounts = await loadAccounts(env);
+    const acc = accounts.find((a) => a.username_lower === lower);
+    const passOk = await verifySecret(
+      String((body && body.password) || ''),
+      (acc && acc.password) || DUMMY_SECRET
+    );
+    if (!acc || !passOk) {
+      return err('用户名或密码不正确', 401, 'bad_credentials');
+    }
+    if (acc.enabled === false) {
+      return err('该账号已被禁用，请联系管理员', 403, 'account_disabled');
+    }
+    const at = nowIso();
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === acc.id);
+      if (rec) {
+        rec.last_login_at = at;
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    const session = await createSession(env, acc);
+    return json({
+      ok: true,
+      token: session.token,
+      expires_at: session.expires_at,
+      user: publicAccount(acc),
+    });
+  }
+
+  /* 退出登录：无论 token 是否有效都返回成功 */
+  if (path === '/api/auth/logout' && request.method === 'POST') {
+    const token = request.headers.get('X-Session-Token') || '';
+    if (token) await revokeSessions(env, null, await sha256Hex(token));
+    return json({ ok: true });
+  }
+
+  /* 当前登录身份 */
+  if (path === '/api/auth/me' && request.method === 'GET') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    return json({ ok: true, user: auth.user, emergency: !!auth.emergency });
+  }
+
+  /* 自助注册（管理员在设置里开启后可用） */
+  if (path === '/api/auth/register' && request.method === 'POST') {
+    if (settings.allow_registration !== true) {
+      return err('当前未开放注册，请联系管理员开通账号', 403, 'registration_disabled');
+    }
+    if (!throttleHit('register', ip, 5, 3600000)) {
+      return err('注册过于频繁，请稍后再试', 429, 'too_many_attempts');
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== 'object') {
+      return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    }
+    const username = String(body.username || '').trim();
+    if (!validUsername(username)) {
+      return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
+    }
+    if (!validPassword(body.password)) {
+      return err('密码长度需为 8~128 位', 400, 'bad_password');
+    }
+    if (!validQuestion(body.question)) {
+      return err('请填写安全问题（2~100 字）', 400, 'bad_question');
+    }
+    if (!validAnswer(body.answer)) {
+      return err('请填写安全问题答案（1~100 字）', 400, 'bad_answer');
+    }
+    const account = await buildAccount(
+      { ...body, username, quota_tokens: settings.default_user_quota_tokens },
+      'user'
+    );
+    let taken = false;
+    let full = false;
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      if (list.some((a) => a.username_lower === account.username_lower)) {
+        taken = true;
+        return;
+      }
+      if (list.length >= MAX_ACCOUNTS) {
+        full = true;
+        return;
+      }
+      list.push(account);
+      await r2PutJson(env, ACCOUNTS_KEY, list);
+    });
+    if (taken) return err('该用户名已被占用', 409, 'username_taken');
+    if (full) return err('账号数量已达上限', 403, 'too_many_accounts');
+    invalidateCache(ACCOUNTS_KEY);
+    const session = await createSession(env, account);
+    return json({
+      ok: true,
+      token: session.token,
+      expires_at: session.expires_at,
+      user: publicAccount(account),
+    });
+  }
+
+  /* 找回密码第一步：取安全问题 */
+  if (path === '/api/auth/recovery' && request.method === 'GET') {
+    if (settings.allow_password_recovery !== true) {
+      return err('未开启问答找回密码，请联系管理员重置密码', 403, 'recovery_disabled');
+    }
+    if (!throttleHit('recovery', ip, 30, 3600000)) {
+      return err('尝试过于频繁，请稍后再试', 429, 'too_many_attempts');
+    }
+    const username = String(url.searchParams.get('username') || '').trim();
+    const accounts = await loadAccounts(env);
+    const acc = accounts.find((a) => a.username_lower === username.toLowerCase());
+    if (!acc || acc.enabled === false || !acc.security || !acc.security.hash) {
+      return err('账号不存在或未设置安全问题', 404, 'no_recovery');
+    }
+    return json({ ok: true, username: acc.username, question: acc.security.question });
+  }
+
+  /* 找回密码第二步：校验答案并直接设置新密码 */
+  if (path === '/api/auth/recover' && request.method === 'POST') {
+    if (settings.allow_password_recovery !== true) {
+      return err('未开启问答找回密码，请联系管理员重置密码', 403, 'recovery_disabled');
+    }
+    const body = await readJsonBody(request);
+    const username = String((body && body.username) || '').trim();
+    const lower = username.toLowerCase();
+    if (!throttleHit('recover', ip + '|' + lower, 10, 600000)) {
+      return err('尝试过于频繁，请 10 分钟后再试', 429, 'too_many_attempts');
+    }
+    if (!validPassword(body && body.new_password)) {
+      return err('新密码长度需为 8~128 位', 400, 'bad_password');
+    }
+    const accounts = await loadAccounts(env);
+    const acc = accounts.find((a) => a.username_lower === lower);
+    if (!acc || acc.enabled === false || !acc.security || !acc.security.hash) {
+      return err('账号不存在或未设置安全问题', 404, 'no_recovery');
+    }
+    const ok = await verifySecret(normalizeAnswer(body.answer), acc.security);
+    if (!ok) return err('安全问题答案不正确', 401, 'bad_answer');
+    const password = await makeSecret(body.new_password);
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === acc.id);
+      if (rec) {
+        rec.password = password;
+        rec.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    // 密码已变更：该账号所有旧会话立即失效
+    await revokeSessions(env, acc.id);
+    return json({ ok: true });
+  }
+
+  /* 修改自己的密码（保留当前会话，其它设备登出） */
+  if (path === '/api/auth/change-password' && request.method === 'POST') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    if (!auth.account) {
+      return err('应急 ADMIN_KEY 没有账号密码，请使用账号登录后修改', 400, 'no_account');
+    }
+    const body = await readJsonBody(request);
+    if (!validPassword(body && body.new_password)) {
+      return err('新密码长度需为 8~128 位', 400, 'bad_password');
+    }
+    const ok = await verifySecret(
+      String((body && body.old_password) || ''),
+      auth.account.password
+    );
+    if (!ok) return err('当前密码不正确', 401, 'bad_password');
+    const password = await makeSecret(body.new_password);
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === auth.account.id);
+      if (rec) {
+        rec.password = password;
+        rec.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    await revokeSessions(env, auth.account.id, auth.tokenHash);
+    return json({ ok: true });
+  }
+
+  /* 设置 / 更新自己的安全问题（需验证当前密码） */
+  if (path === '/api/auth/security' && request.method === 'POST') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    if (!auth.account) {
+      return err('应急 ADMIN_KEY 没有账号，无法设置安全问题', 400, 'no_account');
+    }
+    const body = await readJsonBody(request);
+    if (!validQuestion(body && body.question)) {
+      return err('安全问题需为 2~100 字', 400, 'bad_question');
+    }
+    if (!validAnswer(body && body.answer)) {
+      return err('安全问题答案需为 1~100 字', 400, 'bad_answer');
+    }
+    const ok = await verifySecret(
+      String((body && body.password) || ''),
+      auth.account.password
+    );
+    if (!ok) return err('当前密码不正确', 401, 'bad_password');
+    const security = {
+      question: String(body.question).trim(),
+      ...(await makeSecret(normalizeAnswer(body.answer))),
+    };
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === auth.account.id);
+      if (rec) {
+        rec.security = security;
+        rec.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    return json({ ok: true });
+  }
+
+  return err('未知账号接口', 404, 'not_found');
+}
+
+/* ---------------- 普通用户接口（只能操作自己名下的密钥） ---------------- */
+
+async function handleUser(env, ctx, request) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const auth = await authenticate(env, request);
+  if (!auth.ok) return auth.res;
+  if (!auth.account) {
+    return err('应急 ADMIN_KEY 没有关联账号，请使用管理接口', 400, 'no_account');
+  }
+  const account = auth.account;
+
+  if (path === '/api/user/keys' && request.method === 'GET') {
+    const keys = (await r2GetJson(env, KEYS_KEY, [])) || [];
+    const mine = keys.filter((k) => k.owner_id === account.id);
+    const used = mine.reduce((sum, k) => sum + (Number(k.used_tokens) || 0), 0);
+    const cost = mine.reduce((sum, k) => sum + (Number(k.used_cost) || 0), 0);
+    return json({
+      account: { ...publicAccount(account), used_tokens: used, used_cost: round8(cost) },
+      keys: mine.map(publicKeyView),
+    });
+  }
+
+  if (path === '/api/user/keys' && request.method === 'POST') {
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== 'object') {
+      return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    }
+    const action = body.action || 'create';
+
+    if (action === 'create') {
+      const name = String(body.name || '').trim().slice(0, 60) || '我的密钥';
+      let created = null;
+      let limit = false;
+      await withLock(KEYS_KEY, async () => {
+        const keys = (await r2GetJson(env, KEYS_KEY, [])) || [];
+        if (keys.filter((k) => k.owner_id === account.id).length >= MAX_KEYS_PER_USER) {
+          limit = true;
+          return;
+        }
+        const plain = 'sk-' + randomHex(24);
+        const rec = {
+          id: 'key_' + Date.now().toString(36) + rand(4),
+          key_hash: await sha256Hex(plain),
+          key_prefix: plain.slice(0, 12),
+          name,
+          owner_id: account.id,
+          owner_username: account.username,
+          enabled: true,
+          quota_tokens: 0,
+          rpm: null,
+          allowed_models: [],
+          note: '',
+          expires_at: '',
+          used_tokens: 0,
+          requests: 0,
+          used_cost: 0,
+          created_at: nowIso(),
+        };
+        keys.push(rec);
+        await r2PutJson(env, KEYS_KEY, keys);
+        created = { key: plain, record: publicKeyView(rec) };
+      });
+      if (limit) {
+        return err(`每个账号最多创建 ${MAX_KEYS_PER_USER} 个密钥`, 400, 'key_limit');
+      }
+      invalidateCache(KEYS_KEY);
+      return json({ ok: true, key: created.key, record: created.record });
+    }
+
+    const id = String(body.id || '');
+    let notFound = false;
+    let badAction = false;
+    await withLock(KEYS_KEY, async () => {
+      const keys = (await r2GetJson(env, KEYS_KEY, [])) || [];
+      const idx = keys.findIndex((k) => k.id === id && k.owner_id === account.id);
+      if (idx < 0) {
+        notFound = true;
+        return;
+      }
+      if (action === 'rename') {
+        keys[idx].name = String(body.name || '').trim().slice(0, 60) || keys[idx].name;
+      } else if (action === 'toggle') {
+        keys[idx].enabled = body.enabled !== false;
+      } else if (action === 'delete') {
+        keys.splice(idx, 1);
+      } else {
+        badAction = true;
+        return;
+      }
+      await r2PutJson(env, KEYS_KEY, keys);
+    });
+    if (notFound) return err('密钥不存在', 404, 'not_found');
+    if (badAction) return err('不支持的操作', 400, 'bad_action');
+    invalidateCache(KEYS_KEY);
+    return json({ ok: true });
+  }
+
+  return err('未知用户接口', 404, 'not_found');
+}
+
 /* ---------------- 管理 API ---------------- */
 
 async function handleAdmin(env, ctx, request) {
@@ -2617,10 +3366,17 @@ async function handleAdmin(env, ctx, request) {
   if (!gate.ok) return gate.res;
 
   /* ---- 鉴权探针 ----
-   * 不读 R2、不依赖任何数据，用于控制台单独判断「这个 Admin Key 是否有效」。
+   * 不依赖业务数据，用于控制台单独判断「当前会话是否仍有效」。
    * 这样「数据接口临时故障」就不会被误判成「登录失效」。 */
   if (path === '/api/admin/ping') {
-    return json({ ok: true, time: nowIso() });
+    return json({
+      ok: true,
+      time: nowIso(),
+      version: env.APP_VERSION || VERSION,
+      user: gate.user,
+      emergency: !!gate.emergency,
+      admin_key_configured: !!env.ADMIN_KEY,
+    });
   }
 
   const settings = await loadSettings(env);
@@ -2671,7 +3427,16 @@ async function handleAdmin(env, ctx, request) {
         withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, keys)).then(() => invalidateCache(KEYS_KEY))
       );
     }
-    return json(keys);
+    // 归属显示：普通用户自助创建的密钥带 owner_id，这里补上最新用户名
+    const accounts = await loadAccounts(env);
+    const nameById = new Map(accounts.map((a) => [a.id, a.username]));
+    return json(
+      keys.map((k) =>
+        k && k.owner_id
+          ? { ...k, owner_username: nameById.get(k.owner_id) || k.owner_username || '(已删除)' }
+          : k
+      )
+    );
   }
   if (path === '/api/admin/keys' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
@@ -2684,6 +3449,228 @@ async function handleAdmin(env, ctx, request) {
     await withLock(KEYS_KEY, () => r2PutJson(env, KEYS_KEY, body.keys));
     invalidateCache(KEYS_KEY); // 禁用 / 改配额后立即生效，不等待 TTL
     return json({ ok: true });
+  }
+
+  /* ---- 账号管理（仅管理员） ---- */
+  if (path === '/api/admin/accounts' && request.method === 'GET') {
+    const [accounts, keys] = await Promise.all([
+      loadAccounts(env),
+      r2GetJson(env, KEYS_KEY, []),
+    ]);
+    const list = accounts.map((a) => {
+      const mine = (keys || []).filter((k) => k.owner_id === a.id);
+      return {
+        ...publicAccount(a),
+        key_count: mine.length,
+        used_tokens: mine.reduce((sum, k) => sum + (Number(k.used_tokens) || 0), 0),
+        used_cost: round8(
+          mine.reduce((sum, k) => sum + (Number(k.used_cost) || 0), 0)
+        ),
+        is_current: !!(gate.account && gate.account.id === a.id),
+      };
+    });
+    return json({
+      accounts: list,
+      current_id: gate.account ? gate.account.id : null,
+      emergency: !!gate.emergency,
+    });
+  }
+  if (path === '/api/admin/accounts' && request.method === 'POST') {
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== 'object') {
+      return err('请求体应为 JSON 对象', 400, 'invalid_body');
+    }
+    const action = String(body.action || '');
+
+    if (action === 'create') {
+      const username = String(body.username || '').trim();
+      if (!validUsername(username)) {
+        return err('用户名需为 2~24 位中英文、数字、下划线或短横线', 400, 'bad_username');
+      }
+      if (!validPassword(body.password)) {
+        return err('密码长度需为 8~128 位', 400, 'bad_password');
+      }
+      if (body.question || body.answer) {
+        if (!validQuestion(body.question)) {
+          return err('安全问题需为 2~100 字', 400, 'bad_question');
+        }
+        if (!validAnswer(body.answer)) {
+          return err('安全问题答案需为 1~100 字', 400, 'bad_answer');
+        }
+      }
+      const account = await buildAccount(
+        {
+          username,
+          password: body.password,
+          question: body.question,
+          answer: body.answer,
+          quota_tokens:
+            body.quota_tokens !== undefined
+              ? body.quota_tokens
+              : settings.default_user_quota_tokens,
+        },
+        body.role === 'admin' ? 'admin' : 'user'
+      );
+      let taken = false;
+      let full = false;
+      await withLock(ACCOUNTS_KEY, async () => {
+        const list = await loadAccounts(env);
+        if (list.some((a) => a.username_lower === account.username_lower)) {
+          taken = true;
+          return;
+        }
+        if (list.length >= MAX_ACCOUNTS) {
+          full = true;
+          return;
+        }
+        list.push(account);
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      });
+      if (taken) return err('该用户名已被占用', 409, 'username_taken');
+      if (full) return err('账号数量已达上限', 403, 'too_many_accounts');
+      invalidateCache(ACCOUNTS_KEY);
+      return json({ ok: true, account: publicAccount(account) });
+    }
+
+    if (action === 'update') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少账号 id', 400, 'bad_id');
+      let newSecurity;
+      if (body.clear_security === true) {
+        newSecurity = { clear: true };
+      } else if (body.question || body.answer) {
+        if (!validQuestion(body.question)) {
+          return err('安全问题需为 2~100 字', 400, 'bad_question');
+        }
+        if (!validAnswer(body.answer)) {
+          return err('安全问题答案需为 1~100 字', 400, 'bad_answer');
+        }
+        newSecurity = {
+          value: {
+            question: String(body.question).trim(),
+            ...(await makeSecret(normalizeAnswer(body.answer))),
+          },
+        };
+      }
+      let notFound = false;
+      let conflictMsg = '';
+      let disabled = false;
+      let updated = null;
+      await withLock(ACCOUNTS_KEY, async () => {
+        const list = await loadAccounts(env);
+        const idx = list.findIndex((a) => a.id === id);
+        if (idx < 0) {
+          notFound = true;
+          return;
+        }
+        const a = list[idx];
+        const nextRole =
+          body.role === 'admin' || body.role === 'user'
+            ? body.role
+            : a.role === 'admin'
+              ? 'admin'
+              : 'user';
+        const nextEnabled =
+          body.enabled === undefined ? a.enabled !== false : body.enabled !== false;
+        if (
+          a.role === 'admin' &&
+          a.enabled !== false &&
+          (nextRole !== 'admin' || !nextEnabled) &&
+          enabledAdminCount(list) <= 1
+        ) {
+          conflictMsg = '至少保留一个启用的管理员账号';
+          return;
+        }
+        if (!nextEnabled && gate.account && gate.account.id === id) {
+          conflictMsg = '不能禁用当前登录的账号';
+          return;
+        }
+        a.role = nextRole;
+        a.enabled = nextEnabled;
+        if (body.quota_tokens !== undefined) {
+          a.quota_tokens = clampInt(body.quota_tokens, 0, 1e12, 0);
+        }
+        if (newSecurity && newSecurity.clear) a.security = null;
+        else if (newSecurity && newSecurity.value) a.security = newSecurity.value;
+        a.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+        disabled = !nextEnabled;
+        updated = publicAccount(a);
+      });
+      if (notFound) return err('账号不存在', 404, 'not_found');
+      if (conflictMsg) return err(conflictMsg, 400, 'last_admin');
+      invalidateCache(ACCOUNTS_KEY);
+      if (disabled) await revokeSessions(env, id);
+      return json({ ok: true, account: updated });
+    }
+
+    if (action === 'reset-password') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少账号 id', 400, 'bad_id');
+      if (!validPassword(body.new_password)) {
+        return err('新密码长度需为 8~128 位', 400, 'bad_password');
+      }
+      const password = await makeSecret(body.new_password);
+      let notFound = false;
+      await withLock(ACCOUNTS_KEY, async () => {
+        const list = await loadAccounts(env);
+        const rec = list.find((a) => a.id === id);
+        if (!rec) {
+          notFound = true;
+          return;
+        }
+        rec.password = password;
+        rec.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      });
+      if (notFound) return err('账号不存在', 404, 'not_found');
+      // 管理员重置自己的密码时保留当前会话，避免刚改完就被踢出
+      await revokeSessions(
+        env,
+        id,
+        gate.account && gate.account.id === id ? gate.tokenHash : undefined
+      );
+      return json({ ok: true });
+    }
+
+    if (action === 'delete') {
+      const id = String(body.id || '');
+      if (!id) return err('缺少账号 id', 400, 'bad_id');
+      if (gate.account && gate.account.id === id) {
+        return err('不能删除当前登录的账号', 400, 'self_delete');
+      }
+      let notFound = false;
+      let lastAdmin = false;
+      await withLock(ACCOUNTS_KEY, async () => {
+        const list = await loadAccounts(env);
+        const idx = list.findIndex((a) => a.id === id);
+        if (idx < 0) {
+          notFound = true;
+          return;
+        }
+        const a = list[idx];
+        if (a.role === 'admin' && a.enabled !== false && enabledAdminCount(list) <= 1) {
+          lastAdmin = true;
+          return;
+        }
+        list.splice(idx, 1);
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      });
+      if (notFound) return err('账号不存在', 404, 'not_found');
+      if (lastAdmin) return err('至少保留一个启用的管理员账号', 400, 'last_admin');
+      await revokeSessions(env, id);
+      let removedKeys = 0;
+      await withLock(KEYS_KEY, async () => {
+        const keys = await r2GetJson(env, KEYS_KEY, []);
+        const keep = keys.filter((k) => k.owner_id !== id);
+        removedKeys = keys.length - keep.length;
+        if (removedKeys) await r2PutJson(env, KEYS_KEY, keep);
+      });
+      invalidateCache(ACCOUNTS_KEY, KEYS_KEY);
+      return json({ ok: true, removed_keys: removedKeys });
+    }
+
+    return err('未知操作', 400, 'bad_action');
   }
 
   /* ---- 统计 ---- */
@@ -2769,18 +3756,20 @@ async function handleAdmin(env, ctx, request) {
   /* ---- 备份与恢复 ---- */
   // 当场生成完整快照下载（channels + keys + settings，含时间戳）
   if (path === '/api/admin/backup' && request.method === 'GET') {
-    const [ch, ks, st] = await Promise.all([
+    const [ch, ks, st, ac] = await Promise.all([
       r2GetJson(env, CHANNELS_KEY, []),
       r2GetJson(env, KEYS_KEY, []),
       r2GetJson(env, SETTINGS_KEY, {}),
+      r2GetJson(env, ACCOUNTS_KEY, []),
     ]);
     const snap = {
       type: 'oneapi-gateway-backup',
-      version: 1,
+      version: 2,
       created_at: nowIso(),
       channels: ch,
       keys: ks,
       settings: st,
+      accounts: ac,
     };
     return new Response(JSON.stringify(snap, null, 2), {
       headers: {
@@ -2832,6 +3821,30 @@ async function handleAdmin(env, ctx, request) {
         'confirm_required'
       );
     }
+    // v2 备份带 accounts：恢复账号时必须保留至少一个可用管理员，
+    // 否则恢复完成即锁死后台；同时清空全部会话（旧账号可能已不存在）。
+    let restoreAccounts = false;
+    if (body.accounts !== undefined) {
+      if (!Array.isArray(body.accounts)) {
+        return err('备份中的 accounts 应为数组', 400, 'invalid_backup');
+      }
+      const bad = body.accounts.find(
+        (a) =>
+          !a ||
+          typeof a.username !== 'string' ||
+          !a.password ||
+          typeof a.password.hash !== 'string'
+      );
+      if (bad) return err('备份中的账号数据不完整，已拒绝恢复', 400, 'invalid_backup');
+      if (!body.accounts.some((a) => a.role === 'admin' && a.enabled !== false)) {
+        return err(
+          '备份中的账号里没有可用的管理员，恢复后将无法登录后台，已拒绝',
+          400,
+          'no_admin'
+        );
+      }
+      restoreAccounts = true;
+    }
     const nextSettings = normalizeSettings(body.settings || {});
     await Promise.all([
       withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels)),
@@ -2840,13 +3853,21 @@ async function handleAdmin(env, ctx, request) {
         await r2PutJson(env, SETTINGS_KEY, nextSettings);
         invalidateSettingsCache();
       })(),
+      restoreAccounts
+        ? withLock(ACCOUNTS_KEY, () => r2PutJson(env, ACCOUNTS_KEY, body.accounts))
+        : Promise.resolve(),
     ]);
+    if (restoreAccounts) {
+      await withLock(SESSIONS_KEY, () => r2PutJson(env, SESSIONS_KEY, []));
+    }
     invalidateCache(CHANNELS_KEY);
     invalidateCache(KEYS_KEY);
+    invalidateCache(ACCOUNTS_KEY);
     return json({
       ok: true,
       channels: body.channels.length,
       keys: body.keys.length,
+      accounts: restoreAccounts ? body.accounts.length : undefined,
       restored_at: nowIso(),
     });
   }
@@ -3045,8 +4066,8 @@ export default {
     const path = url.pathname;
 
     if (request.method === 'OPTIONS') {
-      // 管理接口不开放跨域：控制台与 /api/admin/* 天然同源，跨域 preflight 一律拒绝
-      if (path.startsWith('/api/admin/')) {
+      // 管理 / 账号接口不开放跨域：控制台与 /api/* 天然同源，跨域 preflight 一律拒绝
+      if (path.startsWith('/api/')) {
         return new Response(null, { status: 403 });
       }
       return new Response(null, { status: 204, headers: CORS });
@@ -3084,10 +4105,16 @@ export default {
       });
     }
 
-    if (path.startsWith('/api/admin/')) {
-      const res = await handleAdmin(env, ctx, request);
-      // 安全收紧：管理接口响应不携带 CORS 头 —— 控制台与 API 同源，跨域（含恶意网页）
-      // 即使拿到 Admin Key 也不应能直接带着 X-Admin-Key 调用管理接口
+    // 管理 / 账号 / 用户接口统一收紧 CORS：控制台与 API 同源，
+    // 跨域网页即使拿到凭据也不应能直接读取这些接口
+    if (path.startsWith('/api/')) {
+      const res = path.startsWith('/api/auth/')
+        ? await handleAuth(env, ctx, request)
+        : path.startsWith('/api/user/')
+          ? await handleUser(env, ctx, request)
+          : path.startsWith('/api/admin/')
+            ? await handleAdmin(env, ctx, request)
+            : err('接口不存在', 404, 'not_found');
       const h = new Headers(res.headers);
       h.delete('Access-Control-Allow-Origin');
       h.delete('Access-Control-Allow-Headers');
