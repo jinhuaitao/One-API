@@ -421,6 +421,15 @@ function usageCost(settings, model, usage) {
   );
 }
 
+/** 将 Chat Completions / Responses 的 usage 统一成内部统计格式。 */
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const prompt = Number(usage.prompt_tokens ?? usage.input_tokens) || 0;
+  const completion = Number(usage.completion_tokens ?? usage.output_tokens) || 0;
+  const total = Number(usage.total_tokens) || prompt + completion;
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+}
+
 /* ---------------- 种子数据 ---------------- */
 
 function defaultChannels() {
@@ -1877,6 +1886,7 @@ const isDoneBlock = (raw) => /^\s*data:\s*\[DONE\]\s*$/m.test(raw);
  */
 function guardSSEStream(src, {
   onFinish,
+  errorTail = null,
   idleMs = 0,
   keepaliveMs = 0,
   firstByteMs = 0,
@@ -1937,13 +1947,11 @@ function guardSSEStream(src, {
       reason === 'timeout'
         ? '上游超过静默超时未返回数据，网关已中断本次流式响应'
         : '上游流式响应中途中断，网关已提前结束本次流式响应';
+    if (errorTail) return errorTail(reason);
     return (
-      'data: ' +
-      JSON.stringify({
-        error: { message, type: 'gateway_stream_error', code: reason },
-      }) +
-      '\n\n' +
-      'data: [DONE]\n\n'
+      "data: " +
+      JSON.stringify({ error: { message, type: "gateway_stream_error", code: reason } }) +
+      "\n\n" + "data: [DONE]\n\n"
     );
   };
 
@@ -2411,8 +2419,9 @@ async function bumpKeyUsage(env, auth, tokens, cost) {
 
 /** 统一落库：日志 + 统计 + 密钥用量（全部走 waitUntil，不阻塞响应） */
 function recordRequest(env, ctx, o) {
-  const cost = usageCost(o.settings, o.model, o.usage);
-  const tokens = (o.usage && o.usage.total_tokens) || o.tokens || 0;
+  const usage = normalizeUsage(o.usage);
+  const cost = usageCost(o.settings, o.model, usage);
+  const tokens = (usage && usage.total_tokens) || o.tokens || 0;
   ctx.waitUntil(
     (async () => {
       await logUsage(env, {
@@ -2431,7 +2440,7 @@ function recordRequest(env, ctx, o) {
         cost,
         ms: o.ms,
         retries: o.retries || 0,
-        usage_missing: !!o.stream && !o.usage,
+        usage_missing: !!o.stream && !usage,
         error: o.error,
       }, o.settings);
       await bumpStats(env, {
@@ -2448,6 +2457,55 @@ function recordRequest(env, ctx, o) {
       if (o.ok) await bumpKeyUsage(env, o.auth, tokens, cost);
     })().catch(() => {})
   );
+}
+
+function passthroughResponsesSSE(upstreamBody, onFinish, settings) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let usage = null;
+  const activityRef = { lastUpstreamAt: Date.now() };
+  const inspect = (frame) => {
+    for (const line of frame.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        const data = JSON.parse(line.slice(5).trim());
+        const candidate = data.usage || data.response?.usage;
+        if (candidate) usage = normalizeUsage(candidate);
+      } catch {
+        // Preserve unknown Responses event payloads unchanged.
+      }
+    }
+  };
+  const transform = new TransformStream({
+    transform(bytes, controller) {
+      activityRef.lastUpstreamAt = Date.now();
+      buffer += decoder.decode(bytes, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      for (const frame of frames) inspect(frame);
+      controller.enqueue(bytes);
+    },
+    flush() {
+      buffer += decoder.decode();
+      if (buffer) inspect(buffer);
+    },
+  });
+  let pipeError = '';
+  upstreamBody.pipeTo(transform.writable).catch((e) => {
+    pipeError = String(e?.message || e).slice(0, 200);
+  });
+  return guardSSEStream(transform.readable, {
+    idleMs: settings.stream_idle_timeout_ms,
+    keepaliveMs: settings.stream_keepalive_ms,
+    firstByteMs: settings.stream_first_byte_ms,
+    activityRef,
+    errorTail: (reason) =>
+      'event: error\ndata: ' +
+      JSON.stringify({ type: 'error', error: { type: 'gateway_stream_error', code: reason } }) +
+      '\n\n',
+    onFinish: (finish, meta) =>
+      onFinish(usage, finish, pipeError && !meta?.error ? { ...meta, error: pipeError } : meta),
+  });
 }
 
 /* ---------------- 代理主流程 ---------------- */
@@ -2576,23 +2634,25 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
             // meta: { bytes, first_byte } — 已转发字节数 / 是否收到过上游首块（断流诊断用）
             const onFinish = (usage, finish, meta) =>
               resolveFinish({ usage, finish: finish || 'complete', meta });
-            const streamBody = translated
-              ? anthropicStreamToOpenAI(
-                  upstream.body,
-                  body.model,
-                  onFinish,
-                  settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms,
-                  settings.stream_first_byte_ms
-                )
-              : rewriteOpenAISSE(
-                  upstream.body,
-                  body.model,
-                  onFinish,
-                  settings.stream_idle_timeout_ms,
-                  settings.stream_keepalive_ms,
-                  settings.stream_first_byte_ms
-                );
+            const streamBody = path === '/v1/responses'
+              ? passthroughResponsesSSE(upstream.body, onFinish, settings)
+              : translated
+                ? anthropicStreamToOpenAI(
+                    upstream.body,
+                    body.model,
+                    onFinish,
+                    settings.stream_idle_timeout_ms,
+                    settings.stream_keepalive_ms,
+                    settings.stream_first_byte_ms
+                  )
+                : rewriteOpenAISSE(
+                    upstream.body,
+                    body.model,
+                    onFinish,
+                    settings.stream_idle_timeout_ms,
+                    settings.stream_keepalive_ms,
+                    settings.stream_first_byte_ms
+                  );
             ctx.waitUntil(
               finishPromise
                 .then(({ usage, finish, meta }) => {
@@ -4814,7 +4874,7 @@ export default {
         version,
         r2: 'bound',
         admin: '/admin',
-        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/v1/embeddings'],
+        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses'],
       });
     }
 
@@ -4879,7 +4939,7 @@ export default {
 
     if (
       request.method === 'POST' &&
-      ['/v1/chat/completions', '/v1/completions', '/v1/embeddings'].includes(path)
+      ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses'].includes(path)
     ) {
       const auth = await authApiKey(env, request, settings);
       if (!auth.ok) return auth.res;
@@ -4898,6 +4958,7 @@ export {
   rewriteSseBlock,
   rewriteOpenAISSE,
   guardSSEStream,
+  passthroughResponsesSSE,
   withBodyTimeout,
   channelTimeoutMs,
   usageCost,
