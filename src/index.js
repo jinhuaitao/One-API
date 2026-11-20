@@ -1199,6 +1199,11 @@ function pickChannels(channels, model, path) {
     if (!models.includes('*') && !models.includes(model)) return false;
     if ((c.type || 'openai') === 'anthropic' && path !== '/v1/chat/completions')
       return false;
+    // 渠道协议是显式边界：Responses 专用渠道不能被 Chat 请求误用，
+    // 明确的 Chat 渠道也不应被当作 Responses 上游，避免上游返回误导性的 400。
+    const protocol = channelProtocol(c);
+    if (protocol === 'responses' && path !== '/v1/responses') return false;
+    if (protocol === 'chat' && path === '/v1/responses') return false;
     return true;
   });
   list.sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
@@ -4993,6 +4998,7 @@ export {
   passthroughResponsesSSE,
   channelProtocol,
   responseProbeBody,
+  responseSnippet,
   withBodyTimeout,
   channelTimeoutMs,
   usageCost,

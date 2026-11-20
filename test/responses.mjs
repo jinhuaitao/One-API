@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { passthroughResponsesSSE, channelProtocol, responseProbeBody } from '../src/index.js';
+import { passthroughResponsesSSE, channelProtocol, responseProbeBody, responseSnippet, pickChannels } from '../src/index.js';
 
 assert.equal(channelProtocol({ type: 'openai', protocol: 'responses' }), 'responses');
 assert.equal(channelProtocol({ type: 'openai' }), 'chat');
@@ -10,7 +10,15 @@ assert.deepEqual(responseProbeBody('gpt-5.4', 'ping', 'responses'), {
 assert.deepEqual(responseProbeBody('gpt-4o', 'ping', 'chat'), {
   model: 'gpt-4o', messages: [{ role: 'user', content: 'ping' }], max_tokens: 16,
 });
-console.log('ok 1) 渠道协议探测选择正确');
+assert.equal(responseSnippet({ output_text: 'direct' }, false, 'responses'), 'direct');
+assert.equal(responseSnippet({ output: [{ content: [{ type: 'output_text', text: 'nested' }] }] }, false, 'responses'), 'nested');
+const channels = [
+  { id: 'resp', enabled: true, base_url: 'https://r', api_key: 'k', models: ['gpt-5.4'], protocol: 'responses' },
+  { id: 'chat', enabled: true, base_url: 'https://c', api_key: 'k', models: ['gpt-5.4'], protocol: 'chat' },
+];
+assert.deepEqual(pickChannels(channels, 'gpt-5.4', '/v1/responses').map((c) => c.id), ['resp']);
+assert.deepEqual(pickChannels(channels, 'gpt-5.4', '/v1/chat/completions').map((c) => c.id), ['chat']);
+console.log('ok 1) 渠道协议探测与路由隔离正确');
 
 const enc = new TextEncoder();
 const sourceText = [
