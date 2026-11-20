@@ -982,10 +982,24 @@ function apiHeaders(){
   return h;
 }
 /** 不带登录态的请求：登录 / 注册 / 找回等公开接口用，避免错误地触发「被踢出登录」 */
-function fetchJson(path, method, body, headers){
+/** 带超时的 JSON 请求：默认 30 秒。
+ * 之前没有超时：/api/auth/state 一旦没回音，登录页就永远停在「正在检查登录状态…」，
+ * 既不报错也没有重试入口。超时后 reject 一个 code='timeout' 的错误，
+ * 由调用方（bootAuth / connect）显示离线页 + 重试按钮。 */
+function fetchJson(path, method, body, headers, timeoutMs){
   var opt = { method: method || 'GET', headers: headers || {} };
   if(body !== undefined){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  var ms = timeoutMs == null ? 30000 : timeoutMs;
+  var ctrl = null, timer = null;
+  if(ms > 0 && typeof AbortController !== 'undefined'){
+    ctrl = new AbortController();
+    opt.signal = ctrl.signal;
+    timer = setTimeout(function(){
+      try{ ctrl.abort(); }catch(e){}
+    }, ms);
+  }
   return fetch(path, opt).then(function(r){
+    if(timer) clearTimeout(timer);
     return r.json().catch(function(){ return { error: { message: '响应解析失败' } }; }).then(function(d){
       if(!r.ok){
         var e = new Error((d.error && d.error.message) || ('HTTP ' + r.status));
@@ -995,6 +1009,14 @@ function fetchJson(path, method, body, headers){
       }
       return d;
     });
+  }).catch(function(e){
+    if(timer) clearTimeout(timer);
+    if(e && (e.name === 'AbortError' || (ctrl && ctrl.signal.aborted))){
+      var t = new Error('请求超时（' + ms + 'ms 内服务端无响应），请检查网络后重试');
+      t.code = 'timeout';
+      throw t;
+    }
+    throw e;
   });
 }
 function api(path, method, body){
@@ -1342,7 +1364,7 @@ function emergencyLogin(){
 
 /** 拉取公开状态，决定显示初始化 / 登录 / 离线 */
 function bootAuth(msg){
-  return fetchJson('/api/auth/state').then(function(st){
+  return fetchJson('/api/auth/state', undefined, undefined, undefined, 8000).then(function(st){
     AUTH = st || AUTH;
     updateVersion(st && st.version);
     authLost = false;
@@ -1458,7 +1480,7 @@ function connect(silent, pendingMsg){
   var emergency = !TOKEN && !!AK;
   authLost = false;
   setConn('wait');
-  fetchJson('/api/auth/me', 'GET', undefined, apiHeaders()).then(function(r){
+  fetchJson('/api/auth/me', 'GET', undefined, apiHeaders(), 15000).then(function(r){
     ME = r.user || null;
     if(r.emergency) saveEmergency(AK);
     else if(TOKEN && !store.set('og_session', TOKEN)) warnNoStorage();
@@ -2716,7 +2738,7 @@ function totpEnable(){
     ME.totp_enabled = true;
     renderAccount();
     var codes = (r.backup_codes || []).join('  ');
-    confirmDlg('备用码（只显示一次）', '请立即保存以下 10 个备用码，验证码不可用时可用其中任意一个登录，每个只能用一次：\n' + codes).then(function(){});
+    confirmDlg('备用码（只显示一次）', '请立即保存以下 10 个备用码，验证码不可用时可用其中任意一个登录，每个只能用一次：\\n' + codes).then(function(){});
     toast('两步验证已启用', 'ok');
   }).catch(function(e){ toast(e.message, 'bad'); });
 }
@@ -3345,7 +3367,18 @@ if($('acctQ')) $('acctQ').addEventListener('input', renderAccounts);
     if(btn){ e.preventDefault(); btn.click(); }
   });
   $('btnRefresh').addEventListener('click', refresh);
-  bootAuth();
+  /* 兜底看门狗：万一初始化在 bootAuth 之前就抛错、或请求压根没发出去，
+   * 12 秒后仍停留在初始文案就强制显示离线页（带重试按钮），不再无限卡住。
+   * 正常流程里 bootAuth 8 秒超时就会先行收尾，这只防「连 bootAuth 都没跑起来」的情况。 */
+  setTimeout(function(){
+    try{
+      var box = $('authBox');
+      if(box && !box.innerHTML && $('login') && $('login').classList.contains('on')){
+        showAuth('offline', '登录检查超时（12s 内无响应），请检查网络后重试');
+      }
+    }catch(e){}
+  }, 12000);
+  try{ bootAuth(); }catch(e){ showAuth('offline', (e && e.message) || '初始化失败，请重试'); }
 })();
 </script>
 </body>

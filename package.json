@@ -10,7 +10,8 @@
     "deploy": "node scripts/ensure-r2.mjs && wrangler deploy",
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
-    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs && node test/responses.mjs && node test/security.mjs",
+    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs && node test/responses.mjs && node test/security.mjs && node test/login-timeout.mjs",
+    "test:login-timeout": "node test/login-timeout.mjs",
     "test:accounts": "node test/accounts.mjs",
     "test:plans": "node test/plans.mjs",
     "test:background": "node test/background.mjs",
@@ -19,5 +20,5 @@
     "test:security": "node test/security.mjs"
   },
   "type": "module",
-  "version": "2.6.0"
+  "version": "2.6.1"
 }

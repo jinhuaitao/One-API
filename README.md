@@ -9,7 +9,7 @@
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white">
   <img alt="Cloudflare R2" src="https://img.shields.io/badge/Storage-R2-F38020?style=flat-square&logo=cloudflare&logoColor=white">
   <img alt="OpenAI Compatible" src="https://img.shields.io/badge/API-OpenAI%20Compatible-412991?style=flat-square&logo=openai&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/Version-2.6.0-2ea44f?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-2.6.1-2ea44f?style=flat-square">
 </p>
 
 <p><a href="#特性">特性</a> · <a href="#架构">架构</a> · <a href="#部署">部署</a> · <a href="#测试">测试</a> · <a href="#接口">接口</a> · <a href="#设置">设置</a> · <a href="#常见问题">常见问题</a></p>
@@ -136,6 +136,11 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 
 `.dev.vars` 可选写入 `ADMIN_KEY=xxx`。
 
+## 2.6.1 修复说明
+
+- **根因：`/admin` 登录卡死**。2.6.0 新增的 TOTP 备用码提示文案里，模板字面量中的 `\n` 只写了一个反斜杠，输出到 HTML 后变成真换行，把内联 `<script>` 里的单引号字符串截断，整个前端脚本解析失败，`init()` / `bootAuth()` 一次都没跑，页面永远停在初始文案「正在检查登录状态…」。已改成 `\\n`，并新增 `test/login-timeout.mjs`：先断言内联脚本可解析，再用假 DOM 实测无响应与正常返回两种流程。
+- **防御：登录检查不再无限等**。`fetchJson` 支持超时（默认 30s），`bootAuth` 查 `/api/auth/state` 用 8s、`connect` 查 `/api/auth/me` 用 15s，超时显示离线页 + 重试按钮；`init` 再加 12s 看门狗，兜底初始化本身抛错的情况。
+
 ## 2.6.0 迁移说明
 
 - **破坏性变化 1：`ADMIN_KEY` 默认不再能调 `/v1/*`**。`allow_admin_key_as_api_key` 默认值由 `true` 改为 `false`，用 `ADMIN_KEY` 直接调网关会返回 `401 admin_key_disabled`。请先在控制台「密钥管理」生成网关密钥分发给调用方；如需恢复旧行为，在「网关设置」里显式勾选该项。已在 R2 里显式存为 `true` 的旧配置不受影响。
@@ -150,12 +155,13 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 
 | 命令 | 覆盖 |
 | :--- | :--- |
-| `npm test` | 全量回归：账号 + 套餐 + 流式 + 内置保活 + 安全 |
+| `npm test` | 全量回归：账号 + 套餐 + 流式 + 内置保活 + 安全 + 登录超时 |
 | `npm run test:accounts` | 初始化 / 登录 / 注册 / 找回 / 配额 / 备份恢复 |
 | `npm run test:plans` | 套餐 CRUD / 申请审核 / 配额·有效期·RPM·模型限制 |
 | `npm run test:stream` | SSE 分片、断流、超时、`[DONE]`、Anthropic 翻译与保活 |
 | `npm run test:background` | 请求触发保活、清理、告警、备份与双层节流 |
 | `npm run test:security` | 私网拦截 / ADMIN_KEY 默认关闭 / 渠道密钥加密 / TOTP / 乐观并发 / PBKDF2 可配 |
+| `npm run test:login-timeout` | 内联脚本可解析 / 登录检查 8s 超时进离线页 / 正常返回进初始化表单 |
 | `npm run preview` | 生成 `preview/admin-preview.html` 静态预览 |
 
 测试使用内存 R2 与模拟上游，不依赖外部服务。改动流式代码后务必跑 `npm run test:stream`。
