@@ -3021,6 +3021,33 @@ async function deletePrefix(env, prefix) {
  * opts.parallelKeys 时并发探测各 Key（内置保活使用）；手动测试保持串行，
  * 避免一次点击把所有 Key 同时打满。
  */
+function channelProtocol(ch) {
+  return (ch && ch.type !== 'anthropic' && (ch.protocol === 'responses' || ch.responses_only === true))
+    ? 'responses'
+    : 'chat';
+}
+
+function responseProbeBody(model, prompt, protocol) {
+  return protocol === 'responses'
+    ? { model, input: prompt || 'ping', max_output_tokens: 16, store: false }
+    : { model, messages: [{ role: 'user', content: prompt || 'ping' }], max_tokens: 16 };
+}
+
+function responseSnippet(data, translated, protocol) {
+  if (!data) return '';
+  if (translated) return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').slice(0, 200);
+  if (protocol === 'responses') {
+    if (data.output_text) return String(data.output_text).slice(0, 200);
+    return (data.output || [])
+      .flatMap((item) => item.content || [])
+      .filter((part) => part.type === 'output_text' || part.type === 'text')
+      .map((part) => part.text || '')
+      .join('')
+      .slice(0, 200);
+  }
+  return data.choices && data.choices[0] ? String(data.choices[0].message?.content || '').slice(0, 200) : '';
+}
+
 async function testChannel(env, ch, settings, opts = {}) {
   const keys = channelKeys(ch);
   if (!keys.length) {
@@ -3034,6 +3061,8 @@ async function testChannel(env, ch, settings, opts = {}) {
     (ch.models || []).find((m) => m !== '*') ||
     'test';
   const timeoutMs = channelTimeoutMs(ch, settings);
+  const protocol = channelProtocol(ch);
+  const probePath = protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions';
 
   const probeKey = async (key, i) => {
     const started = Date.now();
@@ -3041,8 +3070,8 @@ async function testChannel(env, ch, settings, opts = {}) {
       const { res: upstream, translated } = await forwardOnce(
         ch,
         key,
-        '/v1/chat/completions',
-        { model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16 },
+        probePath,
+        responseProbeBody(model, 'ping', protocol),
         settings
       );
       const ms = Date.now() - started;
@@ -3068,8 +3097,8 @@ async function testChannel(env, ch, settings, opts = {}) {
           .map((b) => b.text)
           .join('')
           .slice(0, 200);
-      } else if (data && data.choices && data.choices[0]) {
-        snippet = String(data.choices[0].message?.content || '').slice(0, 200);
+      } else {
+        snippet = responseSnippet(data, false, protocol);
       }
       return { index: i + 1, ok: true, ms, http_status: upstream.status, snippet };
     } catch (e) {
@@ -4593,7 +4622,10 @@ async function handleAdmin(env, ctx, request) {
     const model = body && body.model;
     if (!model) return err('请提供 model', 400, 'missing_model');
     const channels = await r2GetJson(env, CHANNELS_KEY, []);
-    const candidates = pickChannels(channels, model, '/v1/chat/completions');
+    const candidates = [...new Map(
+      [...pickChannels(channels, model, '/v1/chat/completions'), ...pickChannels(channels, model, '/v1/responses')]
+        .map((c) => [c.id, c])
+    ).values()];
     if (!candidates.length) return json({ ok: false, model, candidates: [], error: '没有可用渠道支持该模型' });
     const attempts = [];
     const started = Date.now();
@@ -4605,8 +4637,8 @@ async function handleAdmin(env, ctx, request) {
         const { res, translated } = await forwardOnce(
           ch,
           apiKey,
-          '/v1/chat/completions',
-          { model, messages: [{ role: 'user', content: body.prompt || 'ping' }], max_tokens: 32 },
+          channelProtocol(ch) === 'responses' ? '/v1/responses' : '/v1/chat/completions',
+          responseProbeBody(model, body.prompt || 'ping', channelProtocol(ch)),
           settings
         );
         if (!res.ok) {
@@ -4622,7 +4654,7 @@ async function handleAdmin(env, ctx, request) {
               model
             )
           : await withBodyTimeout(res, channelTimeoutMs(ch, settings), (r) => r.json());
-        answer = data && data.choices && data.choices[0] ? String(data.choices[0].message?.content || '') : '';
+        answer = responseSnippet(data, translated, channelProtocol(ch));
         attempts.push({ channel: ch.name, ok: true, http_status: res.status });
         break;
       } catch (e) {
@@ -4959,6 +4991,8 @@ export {
   rewriteOpenAISSE,
   guardSSEStream,
   passthroughResponsesSSE,
+  channelProtocol,
+  responseProbeBody,
   withBodyTimeout,
   channelTimeoutMs,
   usageCost,

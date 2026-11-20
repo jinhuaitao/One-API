@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
-import { passthroughResponsesSSE } from '../src/index.js';
+import { passthroughResponsesSSE, channelProtocol, responseProbeBody } from '../src/index.js';
+
+assert.equal(channelProtocol({ type: 'openai', protocol: 'responses' }), 'responses');
+assert.equal(channelProtocol({ type: 'openai' }), 'chat');
+assert.equal(channelProtocol({ type: 'anthropic', protocol: 'responses' }), 'chat');
+assert.deepEqual(responseProbeBody('gpt-5.4', 'ping', 'responses'), {
+  model: 'gpt-5.4', input: 'ping', max_output_tokens: 16, store: false,
+});
+assert.deepEqual(responseProbeBody('gpt-4o', 'ping', 'chat'), {
+  model: 'gpt-4o', messages: [{ role: 'user', content: 'ping' }], max_tokens: 16,
+});
+console.log('ok 1) 渠道协议探测选择正确');
 
 const enc = new TextEncoder();
 const sourceText = [
   'event: response.created\ndata: {"type":"response.created"}\n\n',
   'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}}\n\n',
 ].join('');
-let cancelled = false;
 const upstream = new ReadableStream({
   async start(controller) {
     const bytes = enc.encode(sourceText);
@@ -15,7 +25,6 @@ const upstream = new ReadableStream({
     controller.enqueue(bytes.slice(31));
     controller.close();
   },
-  cancel() { cancelled = true; },
 });
 let result;
 const out = passthroughResponsesSSE(
@@ -27,5 +36,4 @@ const text = await new Response(out).text();
 assert.equal(text, sourceText, 'Responses SSE 必须原样透传');
 assert.deepEqual(result.usage, { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 });
 assert.equal(result.finish, 'complete');
-assert.equal(cancelled, false);
-console.log('ok 1) Responses SSE 原样透传并提取 usage');
+console.log('ok 2) Responses SSE 原样透传并提取 usage');

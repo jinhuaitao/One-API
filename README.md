@@ -23,7 +23,7 @@
 
 | 模块 | 能力 |
 | :--- | :--- |
-| 接口 | `/v1/models`、`/v1/chat/completions`（流式）、`/v1/completions`、`/v1/embeddings` |
+| 接口 | `/v1/models`、`/v1/chat/completions`（流式）、`/v1/completions`、`/v1/embeddings`、`/v1/responses` |
 | 渠道 | OpenAI 兼容直通；Anthropic 原生自动互转（文本 / 图片 / tools / SSE） |
 | 路由 | 优先级 + 权重、多 Key 轮询、失败换 Key、超时重试、熔断、长任务分流 |
 | 模型 | `model_map` 映射、响应模型名回显、模型白名单、`*` 匹配 |
@@ -71,6 +71,12 @@ flowchart LR
 4. **写入 R2** — 请求日志、按天统计、渠道与密钥状态、每日备份。
 
 ## 部署
+
+### Responses API 渠道
+
+上游只支持 Responses API 时，在渠道配置中设置 `protocol: "responses"`。网关会将请求、流式事件和用量统计按 Responses 协议处理；渠道测试、全部测试和后台巡检也会请求 `/v1/responses`。普通渠道省略该字段或使用 `protocol: "chat"`。
+
+渠道 `base_url` 仍不要带 `/v1`，例如：`https://api.xingchiapi.com`。
 
 ### 1. 推送代码
 
@@ -146,7 +152,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 
 | 范围 | 接口 |
 | :--- | :--- |
-| 网关 | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/completions` · `POST /v1/embeddings` |
+| 网关 | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/completions` · `POST /v1/embeddings` · `POST /v1/responses` |
 | 公开 | `GET /` · `GET /healthz` · `GET /admin` · `GET /api/auth/state` |
 | 账号 | `POST /api/auth/{setup,login,logout,register,recover,change-password,security}` · `GET /api/auth/recovery?username=` · `GET /api/auth/me` |
 | 用户 | `GET/POST /api/user/keys`（create / rename / toggle / delete） · `GET/POST /api/user/plans`（request / cancel） |

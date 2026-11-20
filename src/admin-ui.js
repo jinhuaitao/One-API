@@ -1705,7 +1705,8 @@ function miniTable(rows, cols){
 
 /* ---------- 渠道 ---------- */
 function typeBadge(c){
-  return c.type === 'anthropic' ? '<span class="badge info">Anthropic 原生</span>' : '<span class="badge">OpenAI 兼容</span>';
+  if(c.type === 'anthropic') return '<span class="badge info">Anthropic 原生</span>';
+  return c.protocol === 'responses' || c.responses_only === true ? '<span class="badge">Responses API</span>' : '<span class="badge">Chat Completions</span>';
 }
 function modelChips(c){
   var models = (c && c.models) || [];
@@ -1813,10 +1814,12 @@ function openChannelModal(i){
   editingCh = i;
   var c = i >= 0 ? S.channels[i] : { name:'', type:'openai', base_url:'https://api.openai.com', api_key:'', models:[], model_map:{}, headers:{}, priority:100, weight:1, default_max_tokens:4096, enabled:true };
   var isAnthropic = (c.type || 'openai') === 'anthropic';
+  var isResponses = c.protocol === 'responses' || c.responses_only === true;
   openModal('<h3>' + (i >= 0 ? '编辑渠道' : '添加渠道') + '</h3><p class="msub">' + (i >= 0 ? esc(c.name || '') : '配置一个上游模型服务') + '</p>' +
     '<div class="grid">' +
     '<label>名称<input id="m_name" type="text" value="' + esc(c.name || '') + '" placeholder="如：OpenAI 官方"></label>' +
     '<label>渠道类型<select id="m_type"><option value="openai"' + (!isAnthropic ? ' selected' : '') + '>OpenAI 兼容</option><option value="anthropic"' + (isAnthropic ? ' selected' : '') + '>Anthropic 原生</option></select></label>' +
+    '<label>接口协议<select id="m_protocol"><option value="chat"' + (!isResponses ? ' selected' : '') + '>Chat Completions</option><option value="responses"' + (isResponses ? ' selected' : '') + '>Responses API</option></select><span class="hint">上游只支持 Responses 时选择此项，渠道测试和后台巡检也会改走 /v1/responses。</span></label>' +
     '<label>Base URL（末尾不要加 /v1）<input id="m_base" type="text" value="' + esc(c.base_url || '') + '" placeholder="https://api.openai.com"></label>' +
     '<label>优先级（越小越优先）<input id="m_prio" type="number" value="' + esc(c.priority == null ? 100 : c.priority) + '"></label>' +
     '<label>权重（同优先级内加权随机）<input id="m_weight" type="number" min="1" value="' + esc(c.weight || 1) + '"></label>' +
@@ -1855,6 +1858,7 @@ function saveChannel(){
     id: editingCh >= 0 ? S.channels[editingCh].id : 'ch_' + Date.now().toString(36),
     name: name,
     type: $('m_type').value || 'openai',
+    protocol: $('m_protocol').value || 'chat',
     base_url: $('m_base').value.trim().replace(/\\/+$/, ''),
     api_key: keyStr,
     models: models,
