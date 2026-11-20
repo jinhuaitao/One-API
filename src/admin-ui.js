@@ -614,6 +614,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
               <label>当前密码<input id="ac_old" type="password" autocomplete="current-password"></label>
               <label>新密码（8~128 位）<input id="ac_new" type="password" autocomplete="new-password"></label>
               <label>确认新密码<input id="ac_new2" type="password" autocomplete="new-password"></label>
+              <label>两步验证码（仅已开启两步验证的账号需要）<input id="ac_totp" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码或 8 位备用码" autocomplete="one-time-code"></label>
             </div>
             <div class="row end"><button data-act="change-password">保存新密码</button></div>
           </div>
@@ -627,6 +628,10 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <p class="hint" id="acSecHint"></p>
             <div class="row end"><button data-act="save-security">保存安全问题</button></div>
           </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-head"><div><h3>两步验证（TOTP）</h3><p class="desc">开启后登录、找回密码与改密都需要验证码；ADMIN_KEY 应急登录不受影响</p></div></div>
+          <div id="totpBox"></div>
         </div>
       </section>
 
@@ -656,7 +661,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       <section id="t-settings" class="tab">
         <div class="card">
           <div class="card-head"><div><h3>安全</h3><p class="desc">控制管理密钥是否可直接用于业务调用</p></div></div>
-          <label class="check"><input type="checkbox" id="s_allow_admin"> 允许用 ADMIN_KEY 直接调用 /v1/*（便于自测，生产建议关闭）</label>
+          <label class="check"><input type="checkbox" id="s_allow_admin"> 允许用 ADMIN_KEY 直接调用 /v1/*（默认关闭；开启会绕过密钥配额、有效期与套餐限制，生产建议关闭）</label>
           <p class="hint" style="margin-top:8px">ADMIN_KEY 同时保留为控制台的应急登录凭据（登录页「应急 ADMIN_KEY」）；日常请使用账号密码登录。</p>
         </div>
         <div class="card">
@@ -711,7 +716,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
             <label>内置保活间隔（分钟）<input type="number" id="s_patrol_min" min="0" max="1440" step="5"><span class="hint">无需 Cron / 定时任务：网关收到任意请求（包括 /healthz 探活）时，会在响应后于后台检查，到期就对每个启用渠道的每个 Key 发一次真实小请求（耗少量上游额度），同时更新渠道健康状态，状态翻转时发 Telegram 通知。过期日志清理（每天一次）与备份兜底也由该机制顺带完成。完全没有流量时 Worker 不会被唤醒，恢复流量后的首个请求会补跑。0 = 关闭内置保活，默认 30。</span></label>
           </div>
           <div class="grid" style="margin-top:12px">
-            <label>Telegram Bot Token<input type="password" id="s_tg_token" placeholder="123456:ABC-DEF..." autocomplete="off"><span class="hint">找 @BotFather 创建 Bot 获取；留空则不通知。</span></label>
+            <label>Telegram Bot Token<input type="password" id="s_tg_token" placeholder="123456:ABC-DEF..." autocomplete="off"><span class="hint">找 @BotFather 创建 Bot 获取；已配置时显示为掩码，原样保存即保持不变，清空则清除。</span></label>
             <label>Telegram Chat ID<input type="text" id="s_tg_chat" placeholder="接收通知的 chat_id（可向 @userinfobot 发消息查询）"></label>
           </div>
           <div class="grid" style="margin-top:10px">
@@ -812,6 +817,7 @@ var ME = null;
 var AUTH = { initialized: true, allow_registration: false, allow_password_recovery: true, admin_key_configured: false };
 var authMode = 'login';
 var RECOVERY = { username: '', question: '' };
+var TOTP_SETUP = null; // 待启用的 TOTP 密钥 { secret, otpauth_url }，启用成功后清空
 var S = { channels: [], keys: [], settings: {}, stats: null, logs: [], logCursor: null, logDate: '', serverToday: '', logDates: [], accounts: [], my: null, mykeys: [], plans: [], planRequests: [], planPending: 0, userPlans: null };
 var editingCh = -1, editingKey = -1, editingAccount = -1, editingPlan = '';
 var RANGE = 14, METRIC = 'requests';
@@ -1135,6 +1141,7 @@ function showAuth(mode, msg){
     h = '<div class="auth-form">' +
       '<label>用户名或邮箱<input id="a_user" type="text" maxlength="254" placeholder="用户名或 name@example.com" autocomplete="username"></label>' +
       '<label>密码<input id="a_pass" type="password" maxlength="128" autocomplete="current-password"></label>' +
+      '<label id="a_totp_wrap" style="display:none">两步验证码<input id="a_totp" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码或 8 位备用码" autocomplete="one-time-code"></label>' +
       '<button data-act="auth-login">登录</button></div>' +
       (links.length ? '<div class="auth-links">' + links.join('') + '</div>' : '');
   } else if(mode === 'register'){
@@ -1162,6 +1169,7 @@ function showAuth(mode, msg){
       '<div class="auth-q"><span>安全问题</span>' + esc(RECOVERY.question) + '</div>' +
       '<label>答案<input id="r_a" type="password" maxlength="100" autocomplete="off"></label>' +
       '<label>新密码<input id="r_new" type="password" maxlength="128" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+      '<label>两步验证码（仅已开启两步验证的账号需要）<input id="r_totp" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码或 8 位备用码" autocomplete="one-time-code"></label>' +
       '<label>确认新密码<input id="r_new2" type="password" maxlength="128" autocomplete="new-password"></label>' +
       '<button data-act="auth-recover">重置密码</button></div>' +
       '<div class="auth-links"><a class="link" data-act="auth-mode" data-mode="login">返回登录</a></div>';
@@ -1245,14 +1253,25 @@ function setupAdmin(){
 function loginSubmit(){
   var btn = document.querySelector('[data-act="auth-login"]');
   var u = $('a_user').value.trim(), p = $('a_pass').value;
+  var totpEl = $('a_totp');
+  var totp = totpEl ? totpEl.value.trim() : '';
   clearFieldErrors();
   if(!u) return fieldError('a_user', '请输入用户名或邮箱');
   if(!p) return fieldError('a_pass', '请输入密码');
   busyBtn(btn, true, '登录中…');
-  fetchJson('/api/auth/login', 'POST', { username: u, password: p }).then(function(r){
+  var payload = { username: u, password: p };
+  if(totp) payload.totp = totp;
+  fetchJson('/api/auth/login', 'POST', payload).then(function(r){
     return finishLogin(r);
   }).catch(function(e){
     busyBtn(btn, false);
+    if(e.code === 'totp_required'){
+      var wrap = $('a_totp_wrap');
+      if(wrap) wrap.style.display = '';
+      if(totpEl) totpEl.focus();
+      authWarn('该账号已开启两步验证，请输入验证码后再次登录', 'bad');
+      return;
+    }
     authWarn(e.message || '登录失败，请检查网络后重试', 'bad');
   });
 }
@@ -1302,7 +1321,10 @@ function recoveryReset(){
   if(p.length > 128) return fieldError('r_new', '新密码最多 128 位');
   if(p !== p2) return fieldError('r_new2', '两次输入的新密码不一致');
   busyBtn(btn, true, '重置中…');
-  fetchJson('/api/auth/recover', 'POST', { username: RECOVERY.username, answer: a, new_password: p }).then(function(){
+  var recPayload = { username: RECOVERY.username, answer: a, new_password: p };
+  var rTotp = $('r_totp') ? $('r_totp').value.trim() : '';
+  if(rTotp) recPayload.totp = rTotp;
+  fetchJson('/api/auth/recover', 'POST', recPayload).then(function(){
     toast('密码已重置，请使用新密码登录', 'ok');
     showAuth('login');
   }).catch(function(e){
@@ -1747,7 +1769,8 @@ function renderChannels(){
     var c = o.c, i = o.i;
     var hh = c.health;
     var hb = hh ? (hh.ok ? '<span class="badge ok">正常</span>' : '<span class="badge bad" title="' + esc(hh.message || '') + '">异常</span>') : '<span class="badge">-</span>';
-    var subTxt = 'API Key × ' + String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length + (hh && hh.checked_at ? ' · 测试于 ' + fmtTime(hh.checked_at) : '');
+    var keyCount = c.api_key_count != null ? c.api_key_count : String(c.api_key || '').split(',').filter(function(s){ return s.trim(); }).length;
+    var subTxt = 'API Key × ' + keyCount + (c.api_key_preview ? ' · …' + c.api_key_preview : '') + (hh && hh.checked_at ? ' · 测试于 ' + fmtTime(hh.checked_at) : '');
     h += '<tr>' +
       '<td><label class="switch"><input type="checkbox" data-act="toggle-ch" data-i="' + i + '"' + (c.enabled ? ' checked' : '') + '><span></span></label></td>' +
       '<td><div class="tname"><div><b>' + esc(c.name) + '</b><span class="sub" title="' + esc(subTxt) + '">' + esc(subTxt) + '</span></div></div></td>' +
@@ -1828,7 +1851,7 @@ function openChannelModal(i){
     '<label class="check" style="justify-content:flex-start;margin-top:22px"><input id="m_enabled" type="checkbox"' + (c.enabled !== false ? ' checked' : '') + '> 启用该渠道</label>' +
     '<label class="check" style="justify-content:flex-start"><input id="m_longout" type="checkbox"' + (c.long_output_ok !== false ? ' checked' : '') + '> 长输出稳定（大 max_tokens 的长任务优先走这里）</label>' +
     '</div>' +
-    '<label class="fld">渠道 API Key（多个 Key 用英文逗号 , 分隔）<textarea id="m_key" rows="2" placeholder="sk-aaa,sk-bbb">' + esc(c.api_key || '') + '</textarea></label>' +
+    '<label class="fld">渠道 API Key（多个 Key 用英文逗号 , 分隔）<textarea id="m_key" rows="2" placeholder="' + (i >= 0 ? '留空保持不变' : 'sk-aaa,sk-bbb') + '">' + esc(c.api_key || '') + '</textarea></label>' +
     '<label class="fld">对外暴露的模型名（网关模型名，逗号分隔，* 表示全部）<input id="m_models" type="text" value="' + esc((c.models || []).join(',')) + '" placeholder="DeepSeek-V4-Flash,Agents-A1"><span class="hint">调用方用这里的名字请求网关，它同时决定该渠道能被哪些模型名匹配到。</span></label>' +
     '<div class="fld"><div class="toolbar" style="margin-bottom:6px"><span style="font-size:12.5px;color:var(--text2)">模型映射（对外名称 → 渠道真实模型名）</span><div class="spacer"></div><button class="ghost sm" data-act="map-add"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>添加映射</button></div><div id="mapRows">' + mapRowsHtml(c.model_map) + '</div><div class="hint" id="mapHint"></div></div>' +
     '<datalist id="m_modelList"></datalist>' +
@@ -2634,7 +2657,8 @@ function renderAccount(){
     ['已用 Tokens', fmtNum(used)],
     ['最近登录', fmtTime(me.last_login_at)],
     ['创建时间', fmtTime(me.created_at)],
-    ['安全问题', me.has_recovery ? '已设置' : '未设置']
+    ['安全问题', me.has_recovery ? '已设置' : '未设置'],
+    ['两步验证', me.totp_enabled ? '已启用' : '未启用']
   ];
   var h = rows.map(function(r){ return '<div class="kv"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('');
   if(ME.emergency) h += '<div class="login-warn">当前为 ADMIN_KEY 应急登录：没有关联账号，无法修改密码或安全问题。日常请使用账号登录。</div>';
@@ -2650,13 +2674,75 @@ function renderAccount(){
       ? '应急登录无法设置安全问题。'
       : (ME.has_recovery ? '已设置安全问题；重新填写可覆盖旧问题与答案。' : '尚未设置安全问题，忘记密码时无法自助找回。');
   }
+  renderTotpBox(disabled);
+}
+function renderTotpBox(disabled){
+  var box = $('totpBox');
+  if(!box) return;
+  if(disabled){ box.innerHTML = '<p class="hint">应急登录无法设置两步验证。</p>'; return; }
+  if(ME.totp_enabled){
+    box.innerHTML = '<p><span class="badge ok">已启用</span> <span class="muted">登录与改密需要验证码，备用码各只能用一次。</span></p>' +
+      '<div class="grid" style="grid-template-columns:1fr 1fr"><label>当前密码<input id="tp_pw" type="password" autocomplete="current-password"></label>' +
+      '<label>验证码或备用码<input id="tp_code" type="text" inputmode="numeric" maxlength="8" placeholder="6 位验证码或 8 位备用码"></label></div>' +
+      '<div class="row end"><button data-act="totp-disable">停用两步验证</button></div>';
+    return;
+  }
+  var h = '';
+  if(TOTP_SETUP){
+    h = '<div class="auth-q"><span>密钥（只显示一次，请立即扫码或保存）</span><span class="mono">' + esc(TOTP_SETUP.secret) + '</span></div>' +
+      '<p class="hint">用验证器 App（如 Google Authenticator）扫描，或手动输入上方密钥；otpauth 链接：<span class="mono">' + esc(TOTP_SETUP.otpauth_url) + '</span></p>' +
+      '<div class="grid" style="grid-template-columns:1fr 1fr"><label>当前密码<input id="tp_pw" type="password" autocomplete="current-password"></label>' +
+      '<label>验证码<input id="tp_code" type="text" inputmode="numeric" maxlength="6" placeholder="验证器 App 显示的 6 位数字"></label></div>' +
+      '<div class="row end"><button data-act="totp-enable">确认启用</button></div>';
+  } else {
+    h = '<p class="hint">开启后登录、找回密码与改密都需要 6 位验证码；启用时会一次性给出 10 个备用码，请妥善保存。</p>' +
+      '<div class="row end"><button data-act="totp-setup">生成两步验证密钥</button></div>';
+  }
+  box.innerHTML = h;
+}
+function totpSetup(){
+  api('/api/auth/totp/setup', 'POST', {}).then(function(r){
+    TOTP_SETUP = { secret: r.secret, otpauth_url: r.otpauth_url };
+    renderTotpBox(false);
+  }).catch(function(e){ toast(e.message, 'bad'); });
+}
+function totpEnable(){
+  var pw = $('tp_pw') ? $('tp_pw').value : '';
+  var code = $('tp_code') ? $('tp_code').value.trim() : '';
+  if(!pw) return toast('请填写当前密码', 'bad');
+  if(!/^\d{6}$/.test(code)) return toast('请填写 6 位验证码', 'bad');
+  api('/api/auth/totp/enable', 'POST', { password: pw, totp: code }).then(function(r){
+    TOTP_SETUP = null;
+    ME.totp_enabled = true;
+    renderAccount();
+    var codes = (r.backup_codes || []).join('  ');
+    confirmDlg('备用码（只显示一次）', '请立即保存以下 10 个备用码，验证码不可用时可用其中任意一个登录，每个只能用一次：\n' + codes).then(function(){});
+    toast('两步验证已启用', 'ok');
+  }).catch(function(e){ toast(e.message, 'bad'); });
+}
+function totpDisable(){
+  var pw = $('tp_pw') ? $('tp_pw').value : '';
+  var code = $('tp_code') ? $('tp_code').value.trim() : '';
+  if(!pw) return toast('请填写当前密码', 'bad');
+  if(!code) return toast('请填写验证码或备用码', 'bad');
+  confirmDlg('停用两步验证', '停用后登录不再需要验证码，确定继续？').then(function(ok){
+    if(!ok) return;
+    api('/api/auth/totp/disable', 'POST', { password: pw, totp: code }).then(function(){
+      ME.totp_enabled = false;
+      renderAccount();
+      toast('两步验证已停用', 'ok');
+    }).catch(function(e){ toast(e.message, 'bad'); });
+  });
 }
 function changePassword(){
   var oldP = $('ac_old').value, p = $('ac_new').value, p2 = $('ac_new2').value;
   if(!oldP) return toast('请填写当前密码', 'bad');
   if(p.length < 8) return toast('新密码至少 8 位', 'bad');
   if(p !== p2) return toast('两次输入的新密码不一致', 'bad');
-  api('/api/auth/change-password', 'POST', { old_password: oldP, new_password: p }).then(function(){
+  var cpPayload = { old_password: oldP, new_password: p };
+  var cpTotp = $('ac_totp') ? $('ac_totp').value.trim() : '';
+  if(cpTotp) cpPayload.totp = cpTotp;
+  api('/api/auth/change-password', 'POST', cpPayload).then(function(){
     $('ac_old').value = ''; $('ac_new').value = ''; $('ac_new2').value = '';
     toast('密码已修改，其他设备已登出', 'ok');
   }).catch(function(e){ toast(e.message, 'bad'); });
@@ -2808,7 +2894,7 @@ function exportLogs(){
 /* ---------- 设置 ---------- */
 function renderSettings(){
   var s = S.settings || {};
-  $('s_allow_admin').checked = s.allow_admin_key_as_api_key !== false;
+  $('s_allow_admin').checked = s.allow_admin_key_as_api_key === true;
   $('s_allow_reg').checked = s.allow_registration === true;
   $('s_allow_recovery').checked = s.allow_password_recovery !== false;
   $('s_default_user_quota').value = s.default_user_quota_tokens == null ? 0 : s.default_user_quota_tokens;
@@ -3125,6 +3211,9 @@ document.addEventListener('click', function(e){
   else if(act === 'reject-plan-req') openRejectPlanRequest(el.getAttribute('data-id'));
   else if(act === 'submit-reject-plan') rejectPlanRequest(el.getAttribute('data-id'));
   else if(act === 'change-password') changePassword();
+  else if(act === 'totp-setup') totpSetup();
+  else if(act === 'totp-enable') totpEnable();
+  else if(act === 'totp-disable') totpDisable();
   else if(act === 'save-security') saveSecurity();
   else if(act === 'log-prev'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), -1); loadLogs(); }
   else if(act === 'log-next'){ $('logDate').value = shiftDate($('logDate').value || S.serverToday || todayLocal(), 1); loadLogs(); }

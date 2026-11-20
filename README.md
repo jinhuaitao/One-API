@@ -9,7 +9,7 @@
   <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white">
   <img alt="Cloudflare R2" src="https://img.shields.io/badge/Storage-R2-F38020?style=flat-square&logo=cloudflare&logoColor=white">
   <img alt="OpenAI Compatible" src="https://img.shields.io/badge/API-OpenAI%20Compatible-412991?style=flat-square&logo=openai&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/Version-2.5.0-2ea44f?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-2.6.0-2ea44f?style=flat-square">
 </p>
 
 <p><a href="#特性">特性</a> · <a href="#架构">架构</a> · <a href="#部署">部署</a> · <a href="#测试">测试</a> · <a href="#接口">接口</a> · <a href="#设置">设置</a> · <a href="#常见问题">常见问题</a></p>
@@ -28,8 +28,8 @@
 | 路由 | 优先级 + 权重、多 Key 轮询、失败换 Key、超时重试、熔断、长任务分流 |
 | 模型 | `model_map` 映射、响应模型名回显、模型白名单、`*` 匹配 |
 | 流式 | 双超时、下游保活、补发 `[DONE]`、Anthropic ping 转发、异常结束原因入库 |
-| 密钥 | 多 Key 发放、配额 / 有效期 / 模型白名单 / RPM、用量统计、cURL 示例 |
-| 账号 | 管理员初始化、用户名或邮箱登录、注册开关、问答找回、角色隔离、PBKDF2 |
+| 密钥 | 多 Key 发放、配额 / 有效期 / 模型白名单 / RPM、用量统计、cURL 示例；渠道密钥静态加密（ADMIN_KEY 派生 AES-256-GCM） |
+| 账号 | 管理员初始化、用户名或邮箱登录、注册开关、问答找回、角色隔离、PBKDF2、TOTP 两步验证 |
 | 套餐 | 定价与上下架、用户申请、审核生效、配额 / 有效期 / RPM / 模型限制 |
 | 控制台 | 概览、渠道、密钥、日志、账号、套餐、网关设置、系统设置、明暗主题 |
 | 运维 | 请求触发的内置保活、日志清理、每日备份、Telegram 告警（无需 Cron） |
@@ -47,6 +47,7 @@
 - 注册默认关闭；问答找回默认开启，答案忽略大小写与空格。
 - 管理员管理全部资源；普通用户只能管理自己名下的密钥（最多 20 个）与套餐申请。
 - 密码与安全答案用 PBKDF2-SHA256 + 随机盐存储，会话仅存 token 哈希；登录失败统一提示「账号或密码错误」。
+- 两步验证（TOTP，可选开启）：登录、找回密码与改密都需要 6 位验证码或 8 位备用码；`ADMIN_KEY` 应急登录绕过 2FA。
 
 ### 套餐
 
@@ -135,15 +136,26 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 
 `.dev.vars` 可选写入 `ADMIN_KEY=xxx`。
 
+## 2.6.0 迁移说明
+
+- **破坏性变化 1：`ADMIN_KEY` 默认不再能调 `/v1/*`**。`allow_admin_key_as_api_key` 默认值由 `true` 改为 `false`，用 `ADMIN_KEY` 直接调网关会返回 `401 admin_key_disabled`。请先在控制台「密钥管理」生成网关密钥分发给调用方；如需恢复旧行为，在「网关设置」里显式勾选该项。已在 R2 里显式存为 `true` 的旧配置不受影响。
+- **破坏性变化 2：私网 `base_url` 被拒**。渠道 `base_url` 只允许公网 `http/https` 地址，`localhost`、私网 / 回环 / 链路本地 / 元数据地址、以及 `2130706433` / `0x7f000001` / `0177.0.0.1` 这类十进制 / 十六进制 / 八进制 IP 写法都会在保存时返回 `400 invalid_channel_url`，已入库的私网渠道在路由与转发时也会被过滤。**局限**：Workers 里无法做 DNS 解析校验，域名解析到内网（DNS 重绑定）不在本层防御范围；不要把网关暴露给不可信的管理员账号。
+- **渠道密钥与 Telegram token 静态加密**。用 `ADMIN_KEY` 派生 AES-256-GCM 密钥加密后落盘（`enc:v1:…`），控制台 GET 时密钥置空、只返回数量与末 4 位，编辑时留空即保留旧密钥。旧明文密钥兼容转发，下次保存时自动迁移加密。**未配置 `ADMIN_KEY` 时仍明文保存**，生产必须配置 `ADMIN_KEY`。
+- **TOTP 两步验证（可选开启）**。账号页可生成密钥并启用，启用后登录、找回密码与改密都需要 6 位验证码或 8 位备用码（备用码一次性消耗，验证码同一 counter 拒绝二次使用）。`ADMIN_KEY` 应急登录不走账号体系，因此绕过 2FA——这是应急通道，不是漏洞，请妥善保管 `ADMIN_KEY`。
+- **PBKDF2 迭代次数可配**。环境变量 `PBKDF2_ITERATIONS`，默认 `10000`，夹在 `10000~600000`。免费版单请求 CPU 上限 10ms，默认不建议抬；付费版可设 `100000`。老账号沿用记录里的迭代次数，不受影响。
+- **乐观并发只覆盖配额热路径**。`bumpStats`（按天统计）与 `bumpKeyUsage`（密钥用量）改走 R2 etag 条件写，冲突时重读重试最多 3 次；账号 / 会话 / 渠道等文件仍用原有 isolate 内锁，跨 isolate 是 best-effort。
+- **其它**：`/api/auth/state` 不再返回 `version`（去指纹）；wrangler 升到 v4（`^4.165.0`）；`stream-fix/fix.patch` 已删除（里面的流式收尾逻辑早已合入源码）。
+
 ## 测试
 
 | 命令 | 覆盖 |
 | :--- | :--- |
-| `npm test` | 全量回归：账号 + 套餐 + 流式 + 内置保活 |
+| `npm test` | 全量回归：账号 + 套餐 + 流式 + 内置保活 + 安全 |
 | `npm run test:accounts` | 初始化 / 登录 / 注册 / 找回 / 配额 / 备份恢复 |
 | `npm run test:plans` | 套餐 CRUD / 申请审核 / 配额·有效期·RPM·模型限制 |
 | `npm run test:stream` | SSE 分片、断流、超时、`[DONE]`、Anthropic 翻译与保活 |
 | `npm run test:background` | 请求触发保活、清理、告警、备份与双层节流 |
+| `npm run test:security` | 私网拦截 / ADMIN_KEY 默认关闭 / 渠道密钥加密 / TOTP / 乐观并发 / PBKDF2 可配 |
 | `npm run preview` | 生成 `preview/admin-preview.html` 静态预览 |
 
 测试使用内存 R2 与模拟上游，不依赖外部服务。改动流式代码后务必跑 `npm run test:stream`。
@@ -154,7 +166,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 | :--- | :--- |
 | 网关 | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/completions` · `POST /v1/embeddings` · `POST /v1/responses` |
 | 公开 | `GET /` · `GET /healthz` · `GET /admin` · `GET /api/auth/state` |
-| 账号 | `POST /api/auth/{setup,login,logout,register,recover,change-password,security}` · `GET /api/auth/recovery?username=` · `GET /api/auth/me` |
+| 账号 | `POST /api/auth/{setup,login,logout,register,recover,change-password,security}` · `POST /api/auth/totp/{setup,enable,disable}` · `GET /api/auth/recovery?username=` · `GET /api/auth/me` |
 | 用户 | `GET/POST /api/user/keys`（create / rename / toggle / delete） · `GET/POST /api/user/plans`（request / cancel） |
 | 管理 | `GET/POST /api/admin/{channels,keys,accounts,plans,settings}` · `GET /api/admin/ping` · `GET /api/admin/stats?days=N` |
 | 日志 | `GET /api/admin/logs/dates` · `GET /api/admin/logs/summary?date=&limit=&cursor=&ok=&stream=&finish=&model=&q=` · `GET /api/admin/log?key=` · `POST /api/admin/logs/cleanup` · `POST /api/admin/logs/clear` |
@@ -168,7 +180,7 @@ npm run deploy            # 手动部署：ensure-r2 + wrangler deploy
 
 | 设置 | 默认 | 说明 |
 | :--- | :---: | :--- |
-| `allow_admin_key_as_api_key` | `true` | 是否允许 `ADMIN_KEY` 直接调用 `/v1/*`，生产建议关闭 |
+| `allow_admin_key_as_api_key` | `false` | 是否允许 `ADMIN_KEY` 直接调用 `/v1/*`；2.6.0 起默认关闭，旧配置显式存为 `true` 的仍保持 `true` |
 | `request_timeout_ms` | `180000` | 上游请求超时（首字节） |
 | `stream_idle_timeout_ms` | `180000` | 流式静默超时：上游超过该时长无任何字节即判定断流 |
 | `stream_keepalive_ms` | `15000` | 下游保活间隔，0 = 关闭 |

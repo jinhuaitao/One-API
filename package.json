@@ -1,7 +1,7 @@
 {
   "description": "One-API 风格的 AI 网关，运行在 Cloudflare Workers + R2 上，支持控制台连接 GitHub 一键部署并自动创建 R2",
   "devDependencies": {
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.165.0"
   },
   "name": "oneapi-gateway",
   "private": true,
@@ -10,13 +10,14 @@
     "deploy": "node scripts/ensure-r2.mjs && wrangler deploy",
     "dev": "wrangler dev",
     "ensure:r2": "node scripts/ensure-r2.mjs",
-    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs && node test/responses.mjs",
+    "test": "node test/accounts.mjs && node test/plans.mjs && node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs && node test/responses.mjs && node test/security.mjs",
     "test:accounts": "node test/accounts.mjs",
     "test:plans": "node test/plans.mjs",
     "test:background": "node test/background.mjs",
     "test:stream": "node test/idle-firstbyte.mjs && node test/keepalive.mjs && node test/background.mjs",
-    "test:responses": "node test/responses.mjs"
+    "test:responses": "node test/responses.mjs",
+    "test:security": "node test/security.mjs"
   },
   "type": "module",
-  "version": "2.5.0"
+  "version": "2.6.0"
 }

@@ -38,7 +38,7 @@
 
 import { ADMIN_HTML } from './admin-ui.js';
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const CHANNELS_KEY = 'data/channels.json';
 const KEYS_KEY = 'data/keys.json';
 const SETTINGS_KEY = 'data/settings.json';
@@ -128,6 +128,154 @@ function channelKeys(channel) {
     .filter(Boolean);
 }
 
+/* ----------------- 渠道 base_url 私网拦截（P0-2，2.6.0） -----------------
+ * 管理员填的 base_url 会被网关直接 fetch，未经校验等于给拿到管理员账号
+ * 的人一个 SSRF 出口。注意：Workers 里无法做 DNS 解析校验，域名解析到
+ * 内网（DNS 重绑定）不在本层防御范围，见 README「2.6.0 迁移说明」。
+ * URL 构造函数会把 2130706433 / 0x7f000001 / 0177.0.0.1 这类写法规范化
+ * 成 127.0.0.1，因此按规范化后的 hostname 判断即可；原始 host 也再算
+ * 一遍，防止不同运行时的规范化差异。 */
+
+function parseIPv4Part(part) {
+  if (part === '') return null;
+  if (/^0x[0-9a-fA-F]+$/.test(part)) return parseInt(part, 16);
+  if (/^0[0-7]+$/.test(part) && part.length > 1) return parseInt(part, 8);
+  if (/^[0-9]+$/.test(part)) return parseInt(part, 10);
+  return null;
+}
+
+/** inet_aton 语义的 IPv4 解析：支持 127.1 / 127.0.1 / 单整数等写法。返回 4 字节数组或 null。 */
+function parseIPv4(host) {
+  if (typeof host !== 'string' || host.includes(':')) return null;
+  const parts = host.split('.');
+  if (parts.length < 1 || parts.length > 4) return null;
+  const nums = parts.map(parseIPv4Part);
+  if (nums.some((n) => n === null || n < 0)) return null;
+  if (parts.length === 1) {
+    const v = nums[0];
+    if (v > 0xffffffff) return null;
+    return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  }
+  for (let i = 0; i < nums.length - 1; i++) if (nums[i] > 255) return null;
+  const lastMax = Math.pow(256, 5 - nums.length) - 1;
+  if (nums[nums.length - 1] > lastMax) return null;
+  const out = [0, 0, 0, 0];
+  for (let i = 0; i < nums.length - 1; i++) out[i] = nums[i];
+  let v = nums[nums.length - 1];
+  for (let i = 3; i >= nums.length - 1; i--) {
+    out[i] = v & 255;
+    v = Math.floor(v / 256);
+  }
+  return out;
+}
+
+function isPrivateIPv4(o) {
+  const [a, b] = o;
+  if (a === 0) return true; // 0.0.0.0/8（含 0.0.0.0）
+  if (a === 10) return true; // 10/8
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
+  if (a === 127) return true; // 127/8 回环
+  if (a === 169 && b === 254) return true; // 169.254/16 链路本地
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+  if (a === 192 && b === 0 && o[2] === 0) return true; // 192.0.0.0/24
+  if (a === 192 && b === 0 && o[2] === 2) return true; // 192.0.2/24 文档段
+  if (a === 192 && b === 168) return true; // 192.168/16
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15 基准测试
+  if (a === 198 && b === 51 && o[2] === 100) return true; // 198.51.100/24 文档段
+  if (a === 203 && b === 0 && o[2] === 113) return true; // 203.0.113/24 文档段
+  if (a >= 224 && a <= 239) return true; // 224/4 组播
+  if (a >= 240) return true; // 240/4 保留（含 255.255.255.255）
+  return false;
+}
+
+function isPrivateIPv6(host) {
+  let h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === '::' || h === '::1') return true;
+  const groups = h.split(':').filter(Boolean);
+  const first = groups.length ? parseInt(groups[0], 16) : NaN;
+  if (Number.isFinite(first)) {
+    if (first >= 0xfe80 && first <= 0xfebf) return true; // fe80::/10 链路本地
+    if (first >= 0xfc00 && first <= 0xfdff) return true; // fc00::/7 唯一本地
+    if (first === 0x2001 && groups.length > 1 && parseInt(groups[1], 16) === 0x0db8) return true; // 2001:db8::/32 文档段
+  }
+  // ::ffff:a.b.c.d / ::ffff:7f00:1 这类 IPv4 映射地址：按映射的 IPv4 判断
+  const m = h.match(/::ffff:(.+)$/);
+  if (m) {
+    const tail = m[1];
+    if (tail.includes('.')) {
+      const v4 = parseIPv4(tail);
+      if (v4 && isPrivateIPv4(v4)) return true;
+    } else {
+      const tailGroups = tail.split(':').filter(Boolean);
+      if (tailGroups.length >= 2) {
+        const hi = parseInt(tailGroups[tailGroups.length - 2], 16);
+        const lo = parseInt(tailGroups[tailGroups.length - 1], 16);
+        if (Number.isFinite(hi) && Number.isFinite(lo)) {
+          if (isPrivateIPv4([(hi >>> 8) & 255, hi & 255, (lo >>> 8) & 255, lo & 255])) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** 主机名或 IP 字面量是否属于私网 / 回环 / 链路本地 / 元数据地址。 */
+function isPrivateIp(host) {
+  const h = String(host || '').trim().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h.includes(':')) return isPrivateIPv6(h);
+  const v4 = parseIPv4(h);
+  return v4 ? isPrivateIPv4(v4) : false;
+}
+
+function isPrivateHostname(hostname) {
+  let h = String(hostname || '').toLowerCase().trim();
+  if (!h) return true;
+  h = h.replace(/\.$/, '').replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+  if (h === 'metadata' || h === 'metadata.google.internal' || h.endsWith('.metadata.google.internal')) return true;
+  if (h === 'instance-data' || h === 'instance-data-compute-internal') return true;
+  return isPrivateIp(h);
+}
+
+/** 校验渠道 base_url：返回 { ok, reason }。纯函数，可单测。 */
+function validateChannelUrl(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return { ok: false, reason: 'base_url 为空' };
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    return { ok: false, reason: 'base_url 不是合法 URL' };
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return { ok: false, reason: '只允许 http/https 协议' };
+  }
+  if (u.username || u.password) {
+    return { ok: false, reason: 'URL 不得携带用户名或密码' };
+  }
+  const host = (u.hostname || '').toLowerCase();
+  if (!host) return { ok: false, reason: 'base_url 缺少主机名' };
+  if (isPrivateHostname(host)) {
+    return { ok: false, reason: '禁止访问私网 / 回环 / 链路本地 / 元数据地址：' + host };
+  }
+  // 原始 host 再算一遍（防规范化差异，如 2130706433 这类单整数写法）
+  const m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]+)/);
+  if (m) {
+    let auth = m[1];
+    const at = auth.lastIndexOf('@');
+    if (at >= 0) auth = auth.slice(at + 1);
+    let rawHost = auth;
+    if (rawHost.startsWith('[')) rawHost = rawHost.slice(0, rawHost.indexOf(']') + 1);
+    else rawHost = rawHost.split(':')[0];
+    if (rawHost && rawHost.toLowerCase() !== host && isPrivateHostname(rawHost)) {
+      return { ok: false, reason: '禁止访问私网 / 回环 / 链路本地 / 元数据地址：' + rawHost };
+    }
+  }
+  return { ok: true, reason: '' };
+}
+
 /* ----------------- R2 数据层 ----------------- */
 
 async function r2GetJson(env, key, fallback) {
@@ -144,6 +292,46 @@ async function r2PutJson(env, key, value) {
   await env.R2.put(key, JSON.stringify(value, null, 2), {
     httpMetadata: { contentType: 'application/json; charset=utf-8' },
   });
+}
+
+/* ----------------- R2 乐观并发（P0-5，2.6.0） -----------------
+ * R2 支持 conditional put（onlyIf.etagMatches）。读时取 etag，写时带上
+ * etag，条件失败返回 false 而非抛错，调用方重读重试。真实 R2 返回的
+ * etag 直接用；FakeR2 / 旧 mock 没有 etag 时用内容 SHA-256 作合成 etag，
+ * put 忽略 options 的 mock 不会误判为冲突（直接返回 true）。 */
+
+async function r2GetWithEtag(env, key) {
+  try {
+    const obj = await env.R2.get(key);
+    if (!obj) return { value: null, etag: null, exists: false };
+    const text = await obj.text();
+    let value = null;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      value = null;
+    }
+    const etag = obj.etag || obj.httpEtag || (await sha256Hex(text));
+    return { value, etag, exists: true };
+  } catch {
+    return { value: null, etag: null, exists: false };
+  }
+}
+
+async function r2PutJsonConditional(env, key, value, etag) {
+  const body = JSON.stringify(value, null, 2);
+  const opts = { httpMetadata: { contentType: 'application/json; charset=utf-8' } };
+  if (etag) opts.onlyIf = { etagMatches: etag };
+  else opts.onlyIf = { etagDoesNotMatch: '*' };
+  try {
+    await env.R2.put(key, body, opts);
+    return true;
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    const status = e && (e.status || e.statusCode);
+    if (status === 412 || /412|precondition/i.test(msg)) return false;
+    throw e;
+  }
 }
 
 /**
@@ -205,6 +393,7 @@ async function cachedJson(env, key, fallback, ttlMs) {
 
 function invalidateCache(...keys) {
   for (const k of keys) hotCache.delete(k);
+  if (keys.includes(CHANNELS_KEY)) decryptedChannelsCache = { at: 0, value: null };
 }
 
 /** 渠道配置的缓存窗口（路由用；变更极少，可以放宽一点） */
@@ -216,8 +405,11 @@ const KEYS_TTL_MS = 1000;
 
 function defaultSettings() {
   return {
-    /** 是否允许用 ADMIN_KEY 直接作为网关密钥调用 /v1/*（便于自测） */
-    allow_admin_key_as_api_key: true,
+    /** 是否允许用 ADMIN_KEY 直接作为网关密钥调用 /v1/*。
+     * 2.6.0 起默认关闭：ADMIN_KEY 是应急凭据，默认能直调 /v1/* 会绕过
+     * 网关密钥的配额 / 有效期 / 模型白名单 / 套餐限制。已在 R2 里显式
+     * 存为 true 的旧配置仍保持 true（显式值优先），新部署默认 false。 */
+    allow_admin_key_as_api_key: false,
     /** 上游请求超时（毫秒，作用于等待上游响应头阶段）：很多上游在出首个
      * token 前不发响应头，排队/预填充都算在这段里，60s 很容易误杀慢启动，
      * 因此默认放宽到 180s，与流式静默超时对齐（渠道可单独覆盖）。 */
@@ -326,7 +518,7 @@ function defaultSettings() {
 function normalizeSettings(raw) {
   const d = defaultSettings();
   const s = { ...d, ...(raw || {}) };
-  s.allow_admin_key_as_api_key = s.allow_admin_key_as_api_key !== false;
+  s.allow_admin_key_as_api_key = s.allow_admin_key_as_api_key === true;
   s.request_timeout_ms = clampInt(s.request_timeout_ms, 1000, 600000, d.request_timeout_ms);
   s.retries = clampInt(s.retries, 0, 5, d.retries);
   s.breaker_error_threshold = clampInt(
@@ -521,6 +713,9 @@ async function loadSettings(env) {
     return settingsCache.value;
   }
   const s = normalizeSettings(await r2GetJson(env, SETTINGS_KEY, null));
+  if (s.tg_bot_token && isEncryptedSecret(s.tg_bot_token)) {
+    s.tg_bot_token = await decryptSecret(env, s.tg_bot_token);
+  }
   settingsCache = { at: now, value: s };
   return s;
 }
@@ -665,6 +860,143 @@ async function hashKeyRecords(list) {
   return list || [];
 }
 
+/* ----------------- 静态加密：渠道密钥 / Telegram token（P0-3，2.6.0） -----------------
+ * 密钥派生：SHA-256(ADMIN_KEY) 作 AES-256-GCM 密钥（crypto.subtle），
+ * 格式 enc:v1:<base64url(iv|ciphertext)>，加密整个 api_key 字符串
+ * （含多 Key 逗号串）。无 ADMIN_KEY 时明文保存（README 写明需配
+ * ADMIN_KEY 才启用加密）；旧明文兼容读，下次保存时迁移加密。 */
+
+const ENC_PREFIX = 'enc:v1:';
+/** GET /api/admin/settings 返回的 Telegram token 掩码：前端原样回传即「保持不变」。 */
+const TG_TOKEN_MASK = '••••••••';
+
+function bytesToBase64Url(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlToBytes(str) {
+  const b64 = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+  const pad = (4 - (b64.length % 4)) % 4;
+  const bin = atob(b64 + '='.repeat(pad));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+let encKeyCache = { adminKey: null, promise: null };
+
+function channelEncryptionKey(env) {
+  const adminKey = env && env.ADMIN_KEY ? String(env.ADMIN_KEY) : '';
+  if (!adminKey) return Promise.resolve(null);
+  if (encKeyCache.adminKey === adminKey && encKeyCache.promise) return encKeyCache.promise;
+  const promise = (async () => {
+    const raw = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(adminKey));
+    return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, [
+      'encrypt',
+      'decrypt',
+    ]);
+  })();
+  encKeyCache = { adminKey, promise };
+  return promise;
+}
+
+async function encryptSecret(env, plaintext) {
+  const v = String(plaintext == null ? '' : plaintext);
+  if (!v) return '';
+  if (v.startsWith(ENC_PREFIX)) return v;
+  const key = await channelEncryptionKey(env);
+  if (!key) return v;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    new TextEncoder().encode(v)
+  );
+  const all = new Uint8Array(iv.length + ct.byteLength);
+  all.set(iv, 0);
+  all.set(new Uint8Array(ct), iv.length);
+  return ENC_PREFIX + bytesToBase64Url(all);
+}
+
+async function decryptSecret(env, value) {
+  const v = String(value == null ? '' : value);
+  if (!v.startsWith(ENC_PREFIX)) return v;
+  const key = await channelEncryptionKey(env);
+  if (!key) return '';
+  try {
+    const all = base64UrlToBytes(v.slice(ENC_PREFIX.length));
+    if (all.length <= 12) return '';
+    const iv = all.slice(0, 12);
+    const ct = all.slice(12);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(pt);
+  } catch {
+    return '';
+  }
+}
+
+function isEncryptedSecret(v) {
+  return typeof v === 'string' && v.startsWith(ENC_PREFIX);
+}
+
+function channelKeyStats(plaintext) {
+  const keys = String(plaintext || '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+  return {
+    api_key_count: keys.length,
+    api_key_preview: keys.length ? keys[keys.length - 1].slice(-4) : '',
+  };
+}
+
+/** 单条渠道解密（不改原对象）：供 testChannel / test-route 等单条入口用。 */
+async function decryptChannel(env, ch) {
+  if (!ch || typeof ch !== 'object') return ch;
+  const plain = await decryptSecret(env, ch.api_key);
+  return { ...ch, api_key: plain };
+}
+
+/** 解密后的渠道列表缓存：复用 1s 热缓存窗口，解密结果随缓存走，不每请求解密。 */
+let decryptedChannelsCache = { at: 0, value: null };
+
+async function loadChannelsCached(env) {
+  const now = Date.now();
+  if (decryptedChannelsCache.value && now - decryptedChannelsCache.at < CHANNELS_TTL_MS) {
+    return decryptedChannelsCache.value;
+  }
+  const raw = await cachedJson(env, CHANNELS_KEY, [], CHANNELS_TTL_MS);
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const c of list) out.push(await decryptChannel(env, c));
+  decryptedChannelsCache = { at: now, value: out };
+  return out;
+}
+
+/** 管理端 GET 渠道的脱敏视图：api_key 置空，只给计数与末 4 位。 */
+async function publicChannelView(env, ch) {
+  if (!ch || typeof ch !== 'object') return ch;
+  let plain = '';
+  if (isEncryptedSecret(ch.api_key)) plain = await decryptSecret(env, ch.api_key);
+  else plain = String(ch.api_key || '');
+  const stats = channelKeyStats(plain);
+  const count = plain ? stats.api_key_count : ch.api_key_count | 0;
+  const preview = plain ? stats.api_key_preview : ch.api_key_preview || '';
+  const rest = { ...ch };
+  delete rest.api_key;
+  return { ...rest, api_key: '', api_key_count: count, api_key_preview: preview };
+}
+
+/** 设置的 Telegram token 脱敏：有值时返回掩码，无值返回空串。 */
+function maskSettings(s) {
+  return { ...s, tg_bot_token: s && s.tg_bot_token ? TG_TOKEN_MASK : '' };
+}
+
 /* ---------------- 账号 / 会话 ----------------
  *
  * 账号存放在 data/accounts.json，会话存放在 data/sessions.json（只存 token 的
@@ -687,6 +1019,14 @@ const SESSION_TTL_MS = 7 * 86400000;
  * 记录里保存 iterations，未来调整不影响老账号校验。
  */
 const PBKDF2_ITERATIONS = 10000;
+/** PBKDF2 迭代次数：env.PBKDF2_ITERATIONS 可配，默认 10000，夹在 10000~600000。
+ * 免费版单请求 CPU 上限 10ms，默认不抬（10 万次会 1102 强杀）；付费版
+ * 可设 100000。verifySecret 沿用记录里的 iterations，老账号不受影响。 */
+function pbkdf2Iterations(env) {
+  const n = parseInt(env && env.PBKDF2_ITERATIONS, 10);
+  if (!Number.isFinite(n)) return PBKDF2_ITERATIONS;
+  return Math.min(600000, Math.max(10000, n));
+}
 const MAX_ACCOUNTS = 500;
 const MAX_KEYS_PER_USER = 20;
 const MAX_PLANS = 100;
@@ -751,13 +1091,14 @@ async function pbkdf2Hex(password, saltHex, iterations) {
     .join('');
 }
 
-async function makeSecret(value) {
+async function makeSecret(value, iterations) {
+  const it = (iterations | 0) || PBKDF2_ITERATIONS;
   const salt = randomHex(16);
   return {
     algo: 'pbkdf2-sha256',
-    iterations: PBKDF2_ITERATIONS,
+    iterations: it,
     salt,
-    hash: await pbkdf2Hex(value, salt, PBKDF2_ITERATIONS),
+    hash: await pbkdf2Hex(value, salt, it),
   };
 }
 
@@ -765,6 +1106,124 @@ async function verifySecret(value, rec) {
   if (!rec || !rec.salt || !rec.hash) return false;
   const hash = await pbkdf2Hex(value, rec.salt, rec.iterations);
   return bytesEqual(hash, rec.hash);
+}
+
+/* ----------------- TOTP 两步验证（P0-4，2.6.0） -----------------
+ * base32 + HMAC-SHA1 TOTP：30 秒步长、6 位、±1 步容差。防重放：账号
+ * totp.totp_last_step 记录最近一次成功使用的 counter，同一 counter
+ * 的码拒绝二次使用。备用码为 8 位数字，一次性消耗，只存 SHA-256 哈希。
+ * ADMIN_KEY 应急登录不走账号体系，因此绕过 2FA（应急通道，见 README）。 */
+
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Encode(bytes) {
+  let out = '';
+  let bits = 0;
+  let value = 0;
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function base32Decode(str) {
+  const clean = String(str || '').trim().toUpperCase().replace(/=+$/, '');
+  if (!clean || /[^A-Z2-7]/.test(clean)) return null;
+  const out = [];
+  let bits = 0;
+  let value = 0;
+  for (const ch of clean) {
+    value = (value << 5) | B32_ALPHABET.indexOf(ch);
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function generateTotpSecret() {
+  const b = new Uint8Array(20);
+  crypto.getRandomValues(b);
+  return base32Encode(b);
+}
+
+async function totpCode(secret, step) {
+  const keyBytes = base32Decode(secret);
+  if (!keyBytes) return '';
+  const msg = new Uint8Array(8);
+  let v = Math.floor(step);
+  for (let i = 7; i >= 0; i--) {
+    msg[i] = v & 255;
+    v = Math.floor(v / 256);
+  }
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign']
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, msg));
+  const off = sig[sig.length - 1] & 0x0f;
+  const code =
+    (((sig[off] & 0x7f) << 24) |
+      ((sig[off + 1] & 0xff) << 16) |
+      ((sig[off + 2] & 0xff) << 8) |
+      (sig[off + 3] & 0xff)) %
+    1000000;
+  return String(code).padStart(6, '0');
+}
+
+/** 校验 6 位 TOTP：成功返回命中的 step，失败返回 -1。step <= lastStep 的码视为重放。 */
+async function verifyTotpCode(secret, code, lastStep) {
+  const c = String(code == null ? '' : code).trim();
+  if (!/^\d{6}$/.test(c)) return -1;
+  const nowStep = Math.floor(Date.now() / 1000 / 30);
+  for (const d of [-1, 0, 1]) {
+    const step = nowStep + d;
+    if (lastStep != null && step <= lastStep) continue;
+    if ((await totpCode(secret, step)) === c) return step;
+  }
+  return -1;
+}
+
+function generateBackupCodes() {
+  const out = [];
+  for (let i = 0; i < 10; i++) {
+    const b = new Uint8Array(8);
+    crypto.getRandomValues(b);
+    let code = String(1 + (b[0] % 9));
+    for (let j = 1; j < 8; j++) code += String(b[j] % 10);
+    out.push(code);
+  }
+  return out;
+}
+
+/** 校验账号的 TOTP 码或备用码：成功返回更新后的 totp 对象（last_step 前进 / 备用码已消耗），失败返回 null。 */
+async function verifyAccountTotp(account, code) {
+  const t = account && account.totp;
+  if (!t || !t.enabled || !t.secret) return null;
+  const c = String(code == null ? '' : code).trim();
+  if (/^\d{6}$/.test(c)) {
+    const step = await verifyTotpCode(t.secret, c, t.totp_last_step ?? null);
+    if (step < 0) return null;
+    return { ...t, totp_last_step: step };
+  }
+  if (/^\d{8}$/.test(c)) {
+    const h = await sha256Hex(c);
+    const list = Array.isArray(t.backup_codes) ? t.backup_codes : [];
+    if (!list.includes(h)) return null;
+    return { ...t, backup_codes: list.filter((x) => x !== h) };
+  }
+  return null;
 }
 
 /** 安全问题答案归一化：去首尾空白、统一小写、忽略所有空白，减少「看起来一样却不对」 */
@@ -843,6 +1302,7 @@ function publicAccount(a) {
     created_at: a.created_at || '',
     last_login_at: a.last_login_at || '',
     has_recovery: !!(a.security && a.security.hash),
+    totp_enabled: !!(a.totp && a.totp.enabled),
     quota_tokens: a.quota_tokens || 0,
     plan_id: a.plan_id || '',
     plan_name: a.plan_name || '',
@@ -989,14 +1449,14 @@ async function loadAccounts(env) {
   return Array.isArray(list) ? list : [];
 }
 
-async function buildAccount(input, role) {
+async function buildAccount(input, role, iterations) {
   const username = String(input.username || '').trim();
   const now = nowIso();
   const security =
     input.question && input.answer
       ? {
           question: String(input.question).trim(),
-          ...(await makeSecret(normalizeAnswer(input.answer))),
+          ...(await makeSecret(normalizeAnswer(input.answer), iterations)),
         }
       : null;
   return {
@@ -1005,7 +1465,8 @@ async function buildAccount(input, role) {
     username_lower: username.toLowerCase(),
     role: role === 'admin' ? 'admin' : 'user',
     enabled: true,
-    password: await makeSecret(input.password),
+    password: await makeSecret(input.password, iterations),
+    totp: null,
     security,
     quota_tokens: clampInt(input.quota_tokens, 0, 1e12, 0),
     created_at: now,
@@ -1195,6 +1656,7 @@ function weightedShuffle(arr) {
 function pickChannels(channels, model, path) {
   const list = (channels || []).filter((c) => {
     if (!c.enabled || channelKeys(c).length === 0 || !c.base_url) return false;
+    if (!validateChannelUrl(c.base_url).ok) return false;
     const models = c.models || [];
     if (!models.includes('*') && !models.includes(model)) return false;
     if ((c.type || 'openai') === 'anthropic' && path !== '/v1/chat/completions')
@@ -2301,6 +2763,8 @@ async function forwardAnthropic(channel, apiKey, payload, settings) {
 
 /** 按渠道类型分发：openai 走 OpenAI 兼容接口，anthropic 走原生 /v1/messages 并翻译格式 */
 async function forwardOnce(channel, apiKey, path, payload, settings) {
+  const urlCheck = validateChannelUrl(channel && channel.base_url);
+  if (!urlCheck.ok) throw new Error('invalid_channel_url: ' + urlCheck.reason);
   if ((channel.type || 'openai') === 'anthropic') {
     return forwardAnthropic(channel, apiKey, payload, settings);
   }
@@ -2359,13 +2823,14 @@ function bumpBucket(map, name, entry) {
   b.cost = round8(b.cost + (entry.cost || 0));
 }
 
-/** 按天聚合统计（同一 isolate 内按天串行化，尽量避免并发丢计数） */
+/** 按天聚合统计（同一 isolate 内按天串行化 + 跨 isolate 乐观并发）。
+ * 2.6.0：读-改-写走 etag 条件写，412 时重读重试最多 3 次；3 次都冲突
+ * 才退回无条件写（best-effort，不丢本次统计）。 */
 async function bumpStats(env, entry, settings) {
   try {
     const date = dateStr(Date.now(), settings && settings.timezone_offset_minutes);
     const key = STATS_PREFIX + date + '.json';
-    await withLock(key, async () => {
-      const s = (await r2GetJson(env, key, null)) || emptyDaily(date);
+    const apply = (s) => {
       s.requests = (s.requests || 0) + 1;
       if (entry.ok) s.ok = (s.ok || 0) + 1;
       else s.failed = (s.failed || 0) + 1;
@@ -2386,35 +2851,60 @@ async function bumpStats(env, entry, settings) {
       bumpBucket(s.keys, entry.key_name, entry);
       const hour = hourStr(Date.now(), settings && settings.timezone_offset_minutes);
       s.hours[hour] = (s.hours[hour] || 0) + 1;
-      await r2PutJson(env, key, s);
+      return s;
+    };
+    await withLock(key, async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { value, etag } = await r2GetWithEtag(env, key);
+        const next = apply(value || emptyDaily(date));
+        if (await r2PutJsonConditional(env, key, next, etag)) return;
+      }
+      await r2PutJson(env, key, apply((await r2GetJson(env, key, null)) || emptyDaily(date)));
     });
   } catch {
     // 统计失败不影响主流程
   }
 }
 
-/** 累加 Key 的用量与费用（按 keys.json 串行化，避免并发覆盖） */
+/** 累加 Key 的用量与费用（isolate 内串行化 + 跨 isolate 乐观并发，2.6.0）。
+ * 条件写 412 时重读重试最多 3 次；3 次都冲突才退回无条件写。 */
 async function bumpKeyUsage(env, auth, tokens, cost) {
   if (!auth || auth.admin || !auth.record) return;
   try {
+    const match = (k) =>
+      (auth.record.key_hash && k.key_hash === auth.record.key_hash) ||
+      (auth.record.key && k.key === auth.record.key);
+    const apply = (keys) => {
+      const rec = (Array.isArray(keys) ? keys : []).find(match);
+      if (!rec) return null;
+      rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
+      rec.requests = (rec.requests || 0) + 1;
+      rec.used_cost = round8((rec.used_cost || 0) + (cost || 0));
+      rec.last_used_at = nowIso();
+      return keys;
+    };
+    const syncCache = (keys) => {
+      // 顺手把热缓存指向刚写回的最新数组：这样紧接着的鉴权请求看到的
+      // 就是含本次用量的数据，配额判断不会因为缓存而滞后。
+      // 只替换值、保留原 at，因此不会变相延长 TTL。
+      const hit = hotCache.get(KEYS_KEY);
+      if (hit) hotCache.set(KEYS_KEY, { at: hit.at, value: keys });
+    };
     await withLock(KEYS_KEY, async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { value, etag } = await r2GetWithEtag(env, KEYS_KEY);
+        const next = apply(value);
+        if (!next) return;
+        if (await r2PutJsonConditional(env, KEYS_KEY, next, etag)) {
+          syncCache(next);
+          return;
+        }
+      }
       const keys = await r2GetJson(env, KEYS_KEY, []);
-      const rec = keys.find(
-        (k) =>
-          (auth.record.key_hash && k.key_hash === auth.record.key_hash) ||
-          (auth.record.key && k.key === auth.record.key)
-      );
-      if (rec) {
-        rec.used_tokens = (rec.used_tokens || 0) + (tokens || 0);
-        rec.requests = (rec.requests || 0) + 1;
-        rec.used_cost = round8((rec.used_cost || 0) + (cost || 0));
-        rec.last_used_at = nowIso();
-        await r2PutJson(env, KEYS_KEY, keys);
-        // 顺手把热缓存指向刚写回的最新数组：这样紧接着的鉴权请求看到的
-        // 就是含本次用量的数据，配额判断不会因为缓存而滞后。
-        // 只替换值、保留原 at，因此不会变相延长 TTL。
-        const hit = hotCache.get(KEYS_KEY);
-        if (hit) hotCache.set(KEYS_KEY, { at: hit.at, value: keys });
+      const next = apply(keys);
+      if (next) {
+        await r2PutJson(env, KEYS_KEY, next);
+        syncCache(next);
       }
     });
   } catch {
@@ -2551,7 +3041,7 @@ async function handleProxy(env, ctx, request, path, auth, settings) {
     }
   }
 
-  const channels = await cachedJson(env, CHANNELS_KEY, [], CHANNELS_TTL_MS);
+  const channels = await loadChannelsCached(env);
   let candidates = pickChannels(channels, body.model, path);
   // 长任务分流：声明了大 max_tokens 的请求把「长输出稳定」未勾选的渠道排到队尾
   if ((settings.long_task_min_tokens | 0) > 0) {
@@ -3054,7 +3544,10 @@ function responseSnippet(data, translated, protocol) {
 }
 
 async function testChannel(env, ch, settings, opts = {}) {
-  const keys = channelKeys(ch);
+  const channel = await decryptChannel(env, ch);
+  const urlCheck = validateChannelUrl(channel && channel.base_url);
+  if (!urlCheck.ok) return { ok: false, keys: [], error: urlCheck.reason };
+  const keys = channelKeys(channel);
   if (!keys.length) {
     return { ok: false, keys: [], error: '该渠道未配置 API Key' };
   }
@@ -3062,18 +3555,18 @@ async function testChannel(env, ch, settings, opts = {}) {
   // → 兜底 'test'。只用 '*' 的渠道若直接拿 'test' 探测会永远失败，
   // 误标「渠道异常」甚至触发 Telegram 误告警。
   const model =
-    Object.keys(ch.model_map || {})[0] ||
-    (ch.models || []).find((m) => m !== '*') ||
+    Object.keys(channel.model_map || {})[0] ||
+    (channel.models || []).find((m) => m !== '*') ||
     'test';
-  const timeoutMs = channelTimeoutMs(ch, settings);
-  const protocol = channelProtocol(ch);
+  const timeoutMs = channelTimeoutMs(channel, settings);
+  const protocol = channelProtocol(channel);
   const probePath = protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions';
 
   const probeKey = async (key, i) => {
     const started = Date.now();
     try {
       const { res: upstream, translated } = await forwardOnce(
-        ch,
+        channel,
         key,
         probePath,
         responseProbeBody(model, 'ping', protocol),
@@ -3334,7 +3827,6 @@ async function handleAuth(env, ctx, request) {
       allow_registration: settings.allow_registration === true,
       allow_password_recovery: settings.allow_password_recovery !== false,
       admin_key_configured: !!env.ADMIN_KEY,
-      version: env.APP_VERSION || VERSION,
     });
   }
 
@@ -3359,7 +3851,7 @@ async function handleAuth(env, ctx, request) {
     if (!validAnswer(body.answer)) {
       return err('请填写安全问题答案（1~100 字）', 400, 'bad_answer');
     }
-    const account = await buildAccount({ ...body, username }, 'admin');
+    const account = await buildAccount({ ...body, username }, 'admin', pbkdf2Iterations(env));
     let conflict = false;
     await withLock(ACCOUNTS_KEY, async () => {
       const list = await loadAccounts(env);
@@ -3402,6 +3894,23 @@ async function handleAuth(env, ctx, request) {
     }
     if (acc.enabled === false) {
       return err('该账号已被禁用，请联系管理员', 403, 'account_disabled');
+    }
+    // 两步验证：已开启 TOTP 的账号必须带 6 位验证码或 8 位备用码；缺 / 错
+    // 都返回 totp_required，不建会话。备用码一次性消耗，验证码防重放。
+    if (acc.totp && acc.totp.enabled) {
+      const nextTotp = await verifyAccountTotp(acc, body && body.totp);
+      if (!nextTotp) {
+        return err('该账号已开启两步验证，请输入验证码', 401, 'totp_required');
+      }
+      await withLock(ACCOUNTS_KEY, async () => {
+        const list = await loadAccounts(env);
+        const rec = list.find((a) => a.id === acc.id);
+        if (rec) {
+          rec.totp = nextTotp;
+          await r2PutJson(env, ACCOUNTS_KEY, list);
+        }
+      });
+      acc.totp = nextTotp;
     }
     const at = nowIso();
     await withLock(ACCOUNTS_KEY, async () => {
@@ -3461,7 +3970,8 @@ async function handleAuth(env, ctx, request) {
     }
     const account = await buildAccount(
       { ...body, username, quota_tokens: settings.default_user_quota_tokens },
-      'user'
+      'user',
+      pbkdf2Iterations(env)
     );
     let taken = false;
     let full = false;
@@ -3528,12 +4038,20 @@ async function handleAuth(env, ctx, request) {
     }
     const ok = await verifySecret(normalizeAnswer(body.answer), acc.security);
     if (!ok) return err('安全问题答案不正确', 401, 'bad_answer');
-    const password = await makeSecret(body.new_password);
+    let totpUpdate = null;
+    if (acc.totp && acc.totp.enabled) {
+      totpUpdate = await verifyAccountTotp(acc, body && body.totp);
+      if (!totpUpdate) {
+        return err('该账号已开启两步验证，请输入验证码', 401, 'totp_required');
+      }
+    }
+    const password = await makeSecret(body.new_password, pbkdf2Iterations(env));
     await withLock(ACCOUNTS_KEY, async () => {
       const list = await loadAccounts(env);
       const rec = list.find((a) => a.id === acc.id);
       if (rec) {
         rec.password = password;
+        if (totpUpdate) rec.totp = totpUpdate;
         rec.updated_at = nowIso();
         await r2PutJson(env, ACCOUNTS_KEY, list);
       }
@@ -3559,12 +4077,20 @@ async function handleAuth(env, ctx, request) {
       auth.account.password
     );
     if (!ok) return err('当前密码不正确', 401, 'bad_password');
-    const password = await makeSecret(body.new_password);
+    let totpUpdate = null;
+    if (auth.account.totp && auth.account.totp.enabled) {
+      totpUpdate = await verifyAccountTotp(auth.account, body && body.totp);
+      if (!totpUpdate) {
+        return err('该账号已开启两步验证，请输入验证码', 401, 'totp_required');
+      }
+    }
+    const password = await makeSecret(body.new_password, pbkdf2Iterations(env));
     await withLock(ACCOUNTS_KEY, async () => {
       const list = await loadAccounts(env);
       const rec = list.find((a) => a.id === auth.account.id);
       if (rec) {
         rec.password = password;
+        if (totpUpdate) rec.totp = totpUpdate;
         rec.updated_at = nowIso();
         await r2PutJson(env, ACCOUNTS_KEY, list);
       }
@@ -3594,13 +4120,113 @@ async function handleAuth(env, ctx, request) {
     if (!ok) return err('当前密码不正确', 401, 'bad_password');
     const security = {
       question: String(body.question).trim(),
-      ...(await makeSecret(normalizeAnswer(body.answer))),
+      ...(await makeSecret(normalizeAnswer(body.answer), pbkdf2Iterations(env))),
     };
     await withLock(ACCOUNTS_KEY, async () => {
       const list = await loadAccounts(env);
       const rec = list.find((a) => a.id === auth.account.id);
       if (rec) {
         rec.security = security;
+        rec.updated_at = nowIso();
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    return json({ ok: true });
+  }
+
+  /* 两步验证：生成密钥（未启用前可反复生成，启用后需先停用） */
+  if (path === '/api/auth/totp/setup' && request.method === 'POST') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    if (!auth.account) {
+      return err('应急 ADMIN_KEY 没有账号，无法设置两步验证', 400, 'no_account');
+    }
+    if (auth.account.totp && auth.account.totp.enabled) {
+      return err('两步验证已启用，请先停用后再重新设置', 400, 'totp_already_enabled');
+    }
+    const secret = generateTotpSecret();
+    const now = nowIso();
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === auth.account.id);
+      if (rec) {
+        rec.totp = { secret, enabled: false, backup_codes: [], created_at: now, totp_last_step: null };
+        rec.updated_at = now;
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    const label = encodeURIComponent(auth.account.username);
+    return json({
+      ok: true,
+      secret,
+      otpauth_url: `otpauth://totp/OneAPI:${label}?secret=${secret}&issuer=OneAPI&algorithm=SHA1&digits=6&period=30`,
+    });
+  }
+
+  /* 两步验证：密码 + 验证码确认启用，一次性返回 10 个备用码 */
+  if (path === '/api/auth/totp/enable' && request.method === 'POST') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    if (!auth.account) {
+      return err('应急 ADMIN_KEY 没有账号，无法设置两步验证', 400, 'no_account');
+    }
+    const body = await readJsonBody(request);
+    const ok = await verifySecret(
+      String((body && body.password) || ''),
+      auth.account.password
+    );
+    if (!ok) return err('当前密码不正确', 401, 'bad_password');
+    const pending = auth.account.totp;
+    if (!pending || !pending.secret || pending.enabled) {
+      return err('请先生成两步验证密钥', 400, 'totp_not_setup');
+    }
+    const step = await verifyTotpCode(pending.secret, body && body.totp, pending.totp_last_step ?? null);
+    if (step < 0) return err('验证码不正确或已使用', 401, 'totp_invalid');
+    const backupCodes = generateBackupCodes();
+    const hashes = [];
+    for (const c of backupCodes) hashes.push(await sha256Hex(c));
+    const now = nowIso();
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === auth.account.id);
+      if (rec) {
+        rec.totp = {
+          secret: pending.secret,
+          enabled: true,
+          backup_codes: hashes,
+          created_at: pending.created_at || now,
+          totp_last_step: step,
+        };
+        rec.updated_at = now;
+        await r2PutJson(env, ACCOUNTS_KEY, list);
+      }
+    });
+    return json({ ok: true, backup_codes: backupCodes });
+  }
+
+  /* 两步验证：密码 + 验证码（或备用码）停用并清除密钥 */
+  if (path === '/api/auth/totp/disable' && request.method === 'POST') {
+    const auth = await authenticate(env, request);
+    if (!auth.ok) return auth.res;
+    if (!auth.account) {
+      return err('应急 ADMIN_KEY 没有账号，无法设置两步验证', 400, 'no_account');
+    }
+    const body = await readJsonBody(request);
+    const ok = await verifySecret(
+      String((body && body.password) || ''),
+      auth.account.password
+    );
+    if (!ok) return err('当前密码不正确', 401, 'bad_password');
+    if (!auth.account.totp || !auth.account.totp.enabled) {
+      return err('两步验证未启用', 400, 'totp_not_enabled');
+    }
+    const nextTotp = await verifyAccountTotp(auth.account, body && body.totp);
+    if (!nextTotp) return err('验证码不正确或已使用', 401, 'totp_invalid');
+    await withLock(ACCOUNTS_KEY, async () => {
+      const list = await loadAccounts(env);
+      const rec = list.find((a) => a.id === auth.account.id);
+      if (rec) {
+        rec.totp = null;
         rec.updated_at = nowIso();
         await r2PutJson(env, ACCOUNTS_KEY, list);
       }
@@ -3842,28 +4468,76 @@ async function handleAdmin(env, ctx, request) {
 
   /* ---- 设置 ---- */
   if (path === '/api/admin/settings' && request.method === 'GET') {
-    return json(settings);
+    return json(maskSettings(settings));
   }
   if (path === '/api/admin/settings' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return err('请求体应为 JSON 对象', 400, 'invalid_body');
-    const next = normalizeSettings({ ...settings, ...body });
+    // Telegram token：掩码原样回传 = 保持不变；缺省 = 保持旧值；空串 = 清除；新值 = 加密落盘
+    let incomingToken = body.tg_bot_token;
+    if (incomingToken === undefined || incomingToken === TG_TOKEN_MASK) {
+      incomingToken = settings.tg_bot_token;
+    }
+    const next = normalizeSettings({ ...settings, ...body, tg_bot_token: incomingToken });
+    if (next.tg_bot_token && !isEncryptedSecret(next.tg_bot_token)) {
+      next.tg_bot_token = await encryptSecret(env, next.tg_bot_token);
+    }
     await r2PutJson(env, SETTINGS_KEY, next);
     invalidateSettingsCache(); // 立即生效，不等 TTL 过期
-    return json({ ok: true, settings: next });
+    return json({ ok: true, settings: maskSettings(next) });
   }
 
   /* ---- 渠道 ---- */
   if (path === '/api/admin/channels' && request.method === 'GET') {
-    return json(await r2GetJson(env, CHANNELS_KEY, []));
+    const list = await r2GetJson(env, CHANNELS_KEY, []);
+    const out = [];
+    for (const c of Array.isArray(list) ? list : []) out.push(await publicChannelView(env, c));
+    return json(out);
   }
   if (path === '/api/admin/channels' && request.method === 'POST') {
     const body = await request.json().catch(() => null);
     if (!body || !Array.isArray(body.channels)) {
       return err('请求体应为 {channels: [...]}', 400, 'invalid_body');
     }
+    for (const c of body.channels) {
+      if (c && c.base_url) {
+        const v = validateChannelUrl(c.base_url);
+        if (!v.ok) {
+          return err(
+            `渠道「${c.name || c.id || ''}」的 base_url 无效：${v.reason}`,
+            400,
+            'invalid_channel_url'
+          );
+        }
+      }
+    }
+    // 前端 GET 到的 api_key 恒为空：留空 = 保留旧密钥；填了新值才加密落盘
+    const old = await r2GetJson(env, CHANNELS_KEY, []);
+    const oldById = new Map((Array.isArray(old) ? old : []).map((c) => [c.id, c]));
+    const next = [];
+    for (const c of body.channels) {
+      const item = { ...c };
+      const prev = c && c.id ? oldById.get(c.id) : null;
+      let apiKey = String((c && c.api_key) || '');
+      if (!apiKey && prev) apiKey = String(prev.api_key || '');
+      if (apiKey && !isEncryptedSecret(apiKey)) {
+        const stats = channelKeyStats(apiKey);
+        item.api_key = await encryptSecret(env, apiKey);
+        item.api_key_count = stats.api_key_count;
+        item.api_key_preview = stats.api_key_preview;
+      } else if (apiKey) {
+        item.api_key = apiKey;
+        item.api_key_count = (prev && prev.api_key_count) | 0;
+        item.api_key_preview = (prev && prev.api_key_preview) || '';
+      } else {
+        item.api_key = '';
+        item.api_key_count = 0;
+        item.api_key_preview = '';
+      }
+      next.push(item);
+    }
     // 与健康巡检共用一把锁，避免刚保存的配置被并发的巡检写回覆盖
-    await withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, body.channels));
+    await withLock(CHANNELS_KEY, () => r2PutJson(env, CHANNELS_KEY, next));
     invalidateCache(CHANNELS_KEY); // 热路径缓存立即失效，改动即时生效
     return json({ ok: true });
   }
@@ -3975,7 +4649,8 @@ async function handleAdmin(env, ctx, request) {
               ? body.quota_tokens
               : settings.default_user_quota_tokens,
         },
-        body.role === 'admin' ? 'admin' : 'user'
+        body.role === 'admin' ? 'admin' : 'user',
+        pbkdf2Iterations(env)
       );
       if (createPlan) {
         applyPlanToAccount(account, createPlan);
@@ -4020,7 +4695,7 @@ async function handleAdmin(env, ctx, request) {
         newSecurity = {
           value: {
             question: String(body.question).trim(),
-            ...(await makeSecret(normalizeAnswer(body.answer))),
+            ...(await makeSecret(normalizeAnswer(body.answer), pbkdf2Iterations(env))),
           },
         };
       }
@@ -4106,7 +4781,7 @@ async function handleAdmin(env, ctx, request) {
       if (!validPassword(body.new_password)) {
         return err('新密码长度需为 8~128 位', 400, 'bad_password');
       }
-      const password = await makeSecret(body.new_password);
+      const password = await makeSecret(body.new_password, pbkdf2Iterations(env));
       let notFound = false;
       await withLock(ACCOUNTS_KEY, async () => {
         const list = await loadAccounts(env);
@@ -4425,7 +5100,12 @@ async function handleAdmin(env, ctx, request) {
     const body = await request.json().catch(() => ({}));
     const s = { ...settings };
     // 表单里刚填、还没点「保存设置」的配置优先 —— 填完即可测，不用先保存
-    if (body && typeof body.tg_bot_token === 'string' && body.tg_bot_token.trim()) {
+    if (
+      body &&
+      typeof body.tg_bot_token === 'string' &&
+      body.tg_bot_token.trim() &&
+      body.tg_bot_token.trim() !== TG_TOKEN_MASK
+    ) {
       s.tg_bot_token = body.tg_bot_token.trim();
     }
     if (body && typeof body.tg_chat_id === 'string' && body.tg_chat_id.trim()) {
@@ -4635,7 +5315,8 @@ async function handleAdmin(env, ctx, request) {
     const attempts = [];
     const started = Date.now();
     let answer = null;
-    for (const ch of candidates) {
+    for (const rawCh of candidates) {
+      const ch = await decryptChannel(env, rawCh);
       const keys = channelKeys(ch);
       const apiKey = keys[0];
       try {
@@ -5014,4 +5695,23 @@ export {
   cleanupExpiredLogs,
   runBackgroundTasks,
   resetBackgroundThrottle,
+  validateChannelUrl,
+  isPrivateHostname,
+  isPrivateIp,
+  parseIPv4,
+  encryptSecret,
+  decryptSecret,
+  loadChannelsCached,
+  decryptChannel,
+  publicChannelView,
+  r2GetWithEtag,
+  r2PutJsonConditional,
+  bumpStats,
+  bumpKeyUsage,
+  generateTotpSecret,
+  totpCode,
+  verifyTotpCode,
+  base32Encode,
+  base32Decode,
+  pbkdf2Iterations,
 };
